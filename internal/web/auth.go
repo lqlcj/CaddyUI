@@ -316,10 +316,11 @@ func clientIP(r *http.Request) string {
 	}
 	if ip := net.ParseIP(host); ip != nil && ip.IsLoopback() {
 		if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
-			if first, _, ok := strings.Cut(xff, ","); ok {
-				return strings.TrimSpace(first)
-			}
-			return strings.TrimSpace(xff)
+			// 反代在链尾追加新的客户端 IP（追加语义），所以最后一项才是
+			// 离面板最近的那一跳看到的真实来源。取第一项的话，攻击者自己
+			// 带头里的假 XFF 就能逐个换"IP"绕过登录限速。
+			parts := strings.Split(xff, ",")
+			return strings.TrimSpace(parts[len(parts)-1])
 		}
 	}
 	return host
