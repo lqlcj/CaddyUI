@@ -26,7 +26,6 @@ import (
 	"caddyui/internal/caddy"
 	"caddyui/internal/caddybin"
 	"caddyui/internal/certs"
-	"caddyui/internal/dockerapps"
 	"caddyui/internal/store"
 	"caddyui/internal/web"
 )
@@ -55,24 +54,13 @@ func main() {
 		dataDir      = flag.String("data", envOr("./data", "CADDYUI_DATA_DIR", "RELAY_DATA_DIR"), "数据目录（数据库存放位置）")
 		caddyAddr    = flag.String("caddy", envOr("127.0.0.1:2019", "CADDYUI_CADDY_ADMIN", "RELAY_CADDY_ADMIN"), "Caddy Admin API 地址，支持 127.0.0.1:2019 或 unix//run/caddy/admin.sock")
 		caddyData    = flag.String("caddy-data", envOr("", "CADDYUI_CADDY_DATA"), "Caddy 数据目录（证书放在这里），留空自动探测")
-		caddyBin     = flag.String("caddy-bin", envOr("", "CADDYUI_CADDY_BIN"), "Caddy 可执行文件路径，留空自动探测")
-		dockerDir    = flag.String("docker-apps", envOr("", "CADDYUI_DOCKER_APPS"), "Docker Compose 应用目录，留空使用数据目录下的 docker-apps")
-		dockerSock   = flag.String("docker-socket", envOr(dockerapps.DefaultSocketPath, "CADDYUI_DOCKER_SOCKET"), "Docker 管理助手的 unix socket")
-		dockerHelper = flag.Bool("docker-helper", false, "以特权 Docker 管理助手模式运行")
-		dockerGroup  = flag.String("docker-socket-group", envOr("caddy", "CADDYUI_DOCKER_SOCKET_GROUP"), "Docker 助手 socket 的访问用户组")
-		printVer     = flag.Bool("version", false, "显示版本号后退出")
+		caddyBin = flag.String("caddy-bin", envOr("", "CADDYUI_CADDY_BIN"), "Caddy 可执行文件路径，留空自动探测")
+		printVer = flag.Bool("version", false, "显示版本号后退出")
 	)
 	flag.Parse()
 
 	if *printVer {
 		fmt.Println("caddyui", version)
-		return
-	}
-	if *dockerHelper {
-		if strings.TrimSpace(*dockerDir) == "" {
-			log.Fatal("Docker 助手模式必须通过 -docker-apps 指定应用目录")
-		}
-		runDockerHelper(*dockerSock, *dockerDir, *dockerGroup)
 		return
 	}
 
@@ -97,21 +85,12 @@ func main() {
 	if binMgr.BinPath == "" {
 		log.Printf("⚠ 没找到 caddy 可执行文件，设置页看不到内核版本（可用 -caddy-bin 指定）")
 	}
-	appsDir := strings.TrimSpace(*dockerDir)
-	if appsDir == "" {
-		appsDir = filepath.Join(absData, "docker-apps")
-	}
-	dockerMgr := dockerapps.New(appsDir, *dockerSock)
-	if err := dockerMgr.EnsureRoot(); err != nil {
-		log.Printf("⚠ Docker 应用目录不可用：%v", err)
-	}
 
 	svc := &app.Service{
 		Store:  st,
 		Caddy:  caddy.New(*caddyAddr),
 		Certs:  certLoc,
 		Binary: binMgr,
-		Docker: dockerMgr,
 	}
 
 	// 启动时把数据库里的站点同步给 Caddy。这样即使 Caddy 单独重启过、
@@ -177,15 +156,6 @@ func main() {
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = srv.Shutdown(ctx)
-}
-
-func runDockerHelper(socketPath, appsRoot, socketGroup string) {
-	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer cancel()
-	log.Printf("Docker 管理助手启动：socket=%s apps=%s", socketPath, appsRoot)
-	if err := dockerapps.NewHelperServer(socketPath, appsRoot, socketGroup).Serve(ctx); err != nil {
-		log.Fatalf("Docker 管理助手退出：%v", err)
-	}
 }
 
 // dbPath 决定数据库文件叫什么。

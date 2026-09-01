@@ -8,7 +8,6 @@ import (
 	"caddyui/internal/caddy"
 	"caddyui/internal/caddybin"
 	"caddyui/internal/certs"
-	"caddyui/internal/dockerapps"
 	"caddyui/internal/store"
 )
 
@@ -24,7 +23,6 @@ type Service struct {
 	Caddy  *caddy.Client
 	Certs  *certs.Locator
 	Binary *caddybin.Manager
-	Docker *dockerapps.Manager
 }
 
 // Render 生成当前应该生效的 Caddyfile，但不下发。

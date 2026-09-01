@@ -27,7 +27,6 @@ type Server struct {
 // 每个页面模板都会和 layout.html 一起解析。
 var pages = []string{
 	"setup", "login", "sites", "site_form", "config", "settings",
-	"docker_apps", "docker_import", "docker_edit", "docker_app", "docker_images",
 }
 
 // New 构造面板的 http.Handler。
@@ -66,11 +65,7 @@ func (s *Server) parseTemplates() error {
 			}
 		},
 		"join":                    func(parts []string, sep string) string { return strings.Join(parts, sep) },
-		"hasPrefix":               strings.HasPrefix,
-		"portField":               portFieldName,
-		"portOriginalField":       portOriginalFieldName,
-		"composeEnvField":         composeEnvFieldName,
-		"composeEnvOriginalField": composeEnvOriginalFieldName,
+		"hasPrefix": strings.HasPrefix,
 
 		// fmtDate 只要日期，用在证书有效期上——精确到分钟没有意义。
 		"fmtDate": func(t time.Time) string {
@@ -136,27 +131,6 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /settings/password", s.auth(s.handleSettingsPassword))
 	mux.HandleFunc("POST /settings/caddy/check", s.auth(s.handleCaddyCheck))
 	mux.HandleFunc("POST /settings/caddy/upgrade", s.auth(s.handleCaddyUpgrade))
-
-	mux.HandleFunc("GET /docker", s.auth(s.handleDockerApps))
-	mux.HandleFunc("POST /docker/engine/install", s.auth(s.handleDockerEngineInstall))
-	mux.HandleFunc("POST /docker/engine/update", s.auth(s.handleDockerEngineUpdate))
-	mux.HandleFunc("POST /docker/scan", s.auth(s.handleDockerScan))
-	mux.HandleFunc("GET /docker/import", s.auth(s.handleDockerImportForm))
-	mux.HandleFunc("POST /docker/import", s.auth(s.handleDockerImportPrepare))
-	mux.HandleFunc("POST /docker/preview", s.auth(s.handleDockerPreview))
-	mux.HandleFunc("POST /docker/install", s.auth(s.handleDockerInstall))
-	mux.HandleFunc("GET /docker/images", s.auth(s.handleDockerImages))
-	mux.HandleFunc("POST /docker/images/pull", s.auth(s.handleDockerImagePull))
-	mux.HandleFunc("POST /docker/images/remove", s.auth(s.handleDockerImageRemove))
-	mux.HandleFunc("POST /docker/images/prune", s.auth(s.handleDockerImagePrune))
-	mux.HandleFunc("GET /docker/apps/{name}", s.auth(s.handleDockerAppDetail))
-	mux.HandleFunc("GET /docker/apps/{name}/logs", s.auth(s.handleDockerAppLogs))
-	mux.HandleFunc("GET /docker/apps/{name}/compose", s.auth(s.handleDockerAppCompose))
-	mux.HandleFunc("GET /docker/apps/{name}/edit", s.auth(s.handleDockerAppEditForm))
-	mux.HandleFunc("POST /docker/apps/{name}/github-refresh", s.auth(s.handleDockerAppGitHubRefresh))
-	mux.HandleFunc("POST /docker/apps/{name}/edit", s.auth(s.handleDockerAppEdit))
-	mux.HandleFunc("POST /docker/apps/{name}/action/{action}", s.auth(s.handleDockerAppAction))
-	mux.HandleFunc("POST /docker/apps/{name}/delete", s.auth(s.handleDockerAppDelete))
 
 	// 主题切换不需要登录：登录页和初始化页上也有这个按钮。
 	mux.HandleFunc("POST /theme", s.handleThemePublic)
