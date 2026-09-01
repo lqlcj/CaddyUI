@@ -149,20 +149,58 @@ containerd 以及你安装的容器。实际增加多少内存主要取决于具
 
 ---
 
-## 为什么不直接用 Nginx Proxy Manager
+### 将 CaddyUI 81 端口改为仅本机监听
 
-NPM 是 Node.js + Express + React + nginx + certbot(Python) + s6-overlay 打成一个镜像，
-光 Node 进程常驻就 150–250 MB。CaddyUI 把这些全砍掉了：
+如果已经通过 Caddy 将 CaddyUI 反向代理到域名，建议将 CaddyUI 的 `81` 端口修改为仅监听本机，避免管理面板直接暴露在公网。
 
-|              | Nginx Proxy Manager  | CaddyUI            |
-| ------------ | -------------------- | ------------------ |
-| 运行时       | Node.js + Python     | 两个静态二进制     |
-| 证书管理     | certbot（独立进程）  | Caddy 内置，零配置 |
-| 改配置       | 生成 nginx.conf → reload | Admin API 原子下发 |
-| 配置写错了   | 可能 reload 失败留下不一致状态 | **整份拒绝，旧配置继续跑** |
-| 依赖         | 一堆                 | 无                 |
+编辑 CaddyUI 的 systemd 服务文件：
 
-## 实测资源占用
+```
+nano /etc/systemd/system/caddyui.service
+```
+
+找到：
+
+```
+-listen 0.0.0.0:81
+```
+
+修改为：
+
+```
+-listen 127.0.0.1:81
+```
+
+保存并退出后，重新加载 systemd 并重启 CaddyUI：
+
+```
+systemctl daemon-reload
+systemctl restart caddyui
+```
+
+检查监听状态：
+
+```
+ss -lntp | grep :81
+```
+
+正常情况下应显示：
+
+```
+127.0.0.1:81
+```
+
+而不是：
+
+```
+0.0.0.0:81
+```
+
+修改完成后，CaddyUI 只能通过本机访问，公网无法直接访问 `IP:81`，但通过 Caddy 反向代理的域名仍可正常访问。
+
+---
+
+
 
 跑一个站点，空闲状态：
 
