@@ -17,6 +17,11 @@ const (
 	SettingACMECA    = "acme_ca"
 )
 
+// ErrSyncSkippedEmptyDB 表示启动同步被空库保护拦下了：数据库里没有任何站点，
+// 但 Caddy 正在运行真实的 HTTP 站点。此时绝不能把空配置下发过去，否则会把
+// 线上流量全部清掉。
+var ErrSyncSkippedEmptyDB = errors.New("数据库里没有站点，但 Caddy 正在运行配置")
+
 // Service 是面板的业务门面。
 type Service struct {
 	Store  *store.Store
@@ -82,6 +87,21 @@ func (s *Service) ApplyVersion(id int64) error {
 // Sync 在面板启动时把库里的站点推给 Caddy，不记录版本历史（避免每次重启都
 // 塞一条一模一样的记录）。
 func (s *Service) Sync() error {
+	sites, err := s.Store.Sites()
+	if err != nil {
+		return err
+	}
+	// 空库保护：数据库删了之后面板重启，是最危险的场景 —— 新库是空的，
+	// 如果照常下发，正在跑的站点会被清空。先看看 Caddy 是不是还活着、是否
+	// 在服务真实站点；是的话本次启动就跳过同步，等管理员恢复数据库或确认。
+	if len(sites) == 0 {
+		if has, err := s.Caddy.HasHTTPServers(); err != nil {
+			return err
+		} else if has {
+			return ErrSyncSkippedEmptyDB
+		}
+	}
+
 	caddyfile, err := s.Render()
 	if err != nil {
 		return err

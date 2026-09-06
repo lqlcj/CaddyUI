@@ -50,12 +50,12 @@ func main() {
 	log.SetFlags(log.Ldate | log.Ltime)
 
 	var (
-		listen       = flag.String("listen", envOr(":81", "CADDYUI_LISTEN", "RELAY_LISTEN"), "面板监听地址")
-		dataDir      = flag.String("data", envOr("./data", "CADDYUI_DATA_DIR", "RELAY_DATA_DIR"), "数据目录（数据库存放位置）")
-		caddyAddr    = flag.String("caddy", envOr("127.0.0.1:2019", "CADDYUI_CADDY_ADMIN", "RELAY_CADDY_ADMIN"), "Caddy Admin API 地址，支持 127.0.0.1:2019 或 unix//run/caddy/admin.sock")
-		caddyData    = flag.String("caddy-data", envOr("", "CADDYUI_CADDY_DATA"), "Caddy 数据目录（证书放在这里），留空自动探测")
-		caddyBin = flag.String("caddy-bin", envOr("", "CADDYUI_CADDY_BIN"), "Caddy 可执行文件路径，留空自动探测")
-		printVer = flag.Bool("version", false, "显示版本号后退出")
+		listen    = flag.String("listen", envOr(":81", "CADDYUI_LISTEN", "RELAY_LISTEN"), "面板监听地址")
+		dataDir   = flag.String("data", envOr("./data", "CADDYUI_DATA_DIR", "RELAY_DATA_DIR"), "数据目录（数据库存放位置）")
+		caddyAddr = flag.String("caddy", envOr("127.0.0.1:2019", "CADDYUI_CADDY_ADMIN", "RELAY_CADDY_ADMIN"), "Caddy Admin API 地址，支持 127.0.0.1:2019 或 unix//run/caddy/admin.sock")
+		caddyData = flag.String("caddy-data", envOr("", "CADDYUI_CADDY_DATA"), "Caddy 数据目录（证书放在这里），留空自动探测")
+		caddyBin  = flag.String("caddy-bin", envOr("", "CADDYUI_CADDY_BIN"), "Caddy 可执行文件路径，留空自动探测")
+		printVer  = flag.Bool("version", false, "显示版本号后退出")
 	)
 	flag.Parse()
 
@@ -96,7 +96,12 @@ func main() {
 	// 启动时把数据库里的站点同步给 Caddy。这样即使 Caddy 单独重启过、
 	// 或者面板停机期间有人手改了配置，也能自动回到面板认可的状态。
 	if err := svc.Sync(); err != nil {
-		log.Printf("⚠ 启动同步失败（面板仍可使用，修好后在「配置」页点重新下发）: %v", err)
+		if errors.Is(err, app.ErrSyncSkippedEmptyDB) {
+			log.Printf("⚠ 启动同步已跳过：%v。为避免清空线上流量，本次没有向 Caddy 下发配置。"+
+				"请先恢复数据库或手动导入站点，确认后再处理。", err)
+		} else {
+			log.Printf("⚠ 启动同步失败（面板仍可使用，修好后在「配置」页点重新下发）: %v", err)
+		}
 	} else {
 		log.Printf("✓ 已同步配置到 Caddy (%s)", *caddyAddr)
 	}

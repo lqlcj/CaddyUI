@@ -13,8 +13,12 @@ Group=caddy
 # （autosave.json）。也就是说，哪怕面板挂了、数据库删了、机器重启了，
 # 反代也能靠自己恢复到最后一次生效的状态。
 # 只有在从来没有下发过任何配置时，才会回退到 bootstrap.Caddyfile。
+#
+# 注意：这是 API 管理模式，运行配置由 CaddyUI 通过 Admin API 下发，没有一份
+# 本地权威 Caddyfile 可以重载，所以故意不写 ExecReload。不要执行
+# `systemctl reload caddy`：一旦执行，systemd 会明确告诉你本服务不支持 reload，
+# 不会像旧版那样误把线上站点换成下面的空引导配置。
 ExecStart=/usr/bin/caddy run --resume --config /etc/caddy/bootstrap.Caddyfile --adapter caddyfile
-ExecReload=/usr/bin/caddy reload --config /etc/caddy/bootstrap.Caddyfile --force
 
 # 崩了自己爬起来
 Restart=always

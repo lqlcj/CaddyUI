@@ -162,3 +162,33 @@ func (c *Client) CurrentConfig() ([]byte, error) {
 	defer cancel()
 	return c.do(ctx, http.MethodGet, "/config/", "", nil)
 }
+
+// HasHTTPServers 判断 Caddy 当前正在运行的配置里有没有真实的 HTTP 站点。
+//
+// 这是给启动同步的「空库保护」用的：当面板数据库里没有任何站点、而 Caddy
+// 还在线上服务时，绝不自动下发一份空配置把它清掉。
+func (c *Client) HasHTTPServers() (bool, error) {
+	raw, err := c.CurrentConfig()
+	if err != nil {
+		return false, err
+	}
+	return hasHTTPServers(raw), nil
+}
+
+// hasHTTPServers 从 Caddy 的当前配置 JSON 里判断 apps.http.servers 是否有内容。
+// 解析失败时按 true 处理（宁可跳过空库同步，也不冒险清空线上配置）。
+func hasHTTPServers(raw []byte) bool {
+	var cfg struct {
+		Apps map[string]struct {
+			Servers map[string]json.RawMessage `json:"servers"`
+		} `json:"apps"`
+	}
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return true
+	}
+	httpApp, ok := cfg.Apps["http"]
+	if !ok {
+		return false
+	}
+	return len(httpApp.Servers) > 0
+}
