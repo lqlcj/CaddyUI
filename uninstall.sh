@@ -40,6 +40,9 @@ echo
 # ---------- 服务 ----------
 
 # relay 是老版本的服务名，一并清掉，免得留个抢端口的僵尸。
+systemctl disable --now caddyui-upgrade.socket >/dev/null 2>&1 || true
+systemctl stop 'caddyui-upgrade@*.service' >/dev/null 2>&1 || true
+rm -f /etc/systemd/system/caddyui-upgrade.socket /etc/systemd/system/caddyui-upgrade@.service
 for unit in caddyui relay caddy; do
   if systemctl list-unit-files "${unit}.service" >/dev/null 2>&1 \
      && systemctl cat "${unit}.service" >/dev/null 2>&1; then

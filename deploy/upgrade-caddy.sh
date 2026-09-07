@@ -2,7 +2,7 @@
 #
 # CaddyUI —— Caddy 内核升级助手
 #
-# 这个脚本以 root 身份运行，由面板通过 sudo 调用。
+# 这个脚本由独立的 systemd 升级服务以 root 身份运行。
 #
 # ─────────────────────────────────────────────────────────────────────────
 # 为什么要单独搞一个脚本，而不是让面板自己去下载安装？
@@ -19,12 +19,10 @@
 # 反过来，如果脚本设计成「装我给你的这个文件」，那面板就能喂给它任意二进制，
 # 等于直接送 root。这条边界不能松。
 #
-# 配套的 sudoers 规则（/etc/sudoers.d/caddyui）也只放行这一个脚本：
-#
-#   caddy ALL=(root) NOPASSWD: /usr/local/lib/caddyui/upgrade-caddy.sh
+# 面板通过 caddyui-upgrade.socket 请求固定操作，不继承面板的环境或沙箱。
 #
 # 另外，本脚本必须是 root:root 0755，所在目录也必须 root 所有 ——
-# 只要 caddy 用户能改这个文件，上面那条 sudoers 规则就等于白送 root。
+# caddy 用户不能修改这些文件。
 # install.sh 每次都会重新设置这些权限。
 # ─────────────────────────────────────────────────────────────────────────
 
@@ -48,7 +46,12 @@ SERVICE=caddy
 log()  { printf '%s\n' "$*"; }
 die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 
-[ "$(id -u)" -eq 0 ] || die "必须以 root 运行（面板会通过 sudo 调用本脚本）"
+[ "$(id -u)" -eq 0 ] || die "必须由 root 或独立的升级服务运行"
+[ "$#" -eq 0 ] || die "升级助手不接受参数"
+
+# Serialize across panel restarts and simultaneous socket connections.
+exec 9>/run/caddyui-upgrade.lock
+flock -n 9 || die "已有升级任务正在运行"
 
 command -v curl >/dev/null 2>&1 || die "需要 curl"
 command -v tar  >/dev/null 2>&1 || die "需要 tar"

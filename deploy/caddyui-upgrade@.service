@@ -1,0 +1,16 @@
+[Unit]
+Description=CaddyUI privileged Caddy upgrade request
+
+[Service]
+Type=exec
+User=root
+Group=root
+ExecStart=/usr/bin/env -i PATH=/usr/sbin:/usr/bin:/sbin:/bin LC_ALL=C /bin/bash /usr/local/lib/caddyui/upgrade-request.sh
+StandardInput=socket
+StandardOutput=inherit
+StandardError=inherit
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+UMask=0077
+RuntimeMaxSec=15min

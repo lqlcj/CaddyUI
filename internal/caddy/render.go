@@ -55,7 +55,7 @@ func Render(opts RenderOptions) []byte {
 		if site.HasBasicAuth() {
 			b.WriteString("\tbasic_auth {\n")
 			// 哈希加引号：bcrypt 里有 $ 和 . 等字符，加引号最保险。
-			b.WriteString(fmt.Sprintf("\t\t%s %q\n", site.BasicUser, site.BasicHash))
+			b.WriteString(fmt.Sprintf("\t\t%q %q\n", site.BasicUser, site.BasicHash))
 			b.WriteString("\t}\n")
 		}
 

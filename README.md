@@ -38,10 +38,9 @@ curl -fsSL https://raw.githubusercontent.com/lqlcj/CaddyUI/main/install.sh | sud
 - 重复执行这条命令 = 升级到最新版，数据不会丢
 - 81 端口是**救援通道**：万一配置改崩、域名进不来面板了，还能靠它进来点回滚。
   建议在面板里加一条站点把面板自己反代成 HTTPS 域名，再用防火墙把 81 只放给自己的 IP
-- 安装脚本会写一条 sudo 授权 `/etc/sudoers.d/caddyui`，用途只有一个：让面板能
-  点一下升级 Caddy 内核。它只放行一个 root 拥有、不接受任何参数的助手脚本，
-  细节见下面「升级 Caddy 内核」。不想要这个功能就把那个文件删掉，
-  面板会显示「一键升级不可用」，其它功能照常
+- 安装脚本会启用 `caddyui-upgrade.socket`，通过受文件权限保护的 Unix socket
+  请求独立的 root 服务升级 Caddy。不需要 sudo，面板仍保留沙箱限制。
+  不需要此功能时执行 `sudo systemctl disable --now caddyui-upgrade.socket`。
 
 ### 从旧版 Relay 升级
 
@@ -73,6 +72,15 @@ curl -fsSL https://raw.githubusercontent.com/lqlcj/CaddyUI/main/uninstall.sh | s
 路径是扫描磁盘得到的真实文件，不是按规则拼出来的。
 
 > 证书续期后文件**原地更新、路径不变**，所以引用它的程序记得配成定期重载。
+
+停用站点会保留设置和证书，之后可以重新启用。删除站点会移除站点记录并下发新配置；
+删除确认框可勾选「同时清理该站点独占的证书、私钥和元数据」，默认保留证书。
+清理只在配置成功发布后执行，只处理 Caddy 标准证书目录中的 `.crt`、`.key`、`.json` 文件。
+其他站点（包括已停用站点）共用的证书、包含其他域名的证书、无法解析的证书会保留；
+其他站点存在自定义配置时也会跳过清理。上游应用、网站文件、DNS、ACME 账户和配置历史不受影响。
+面板无法检测外部程序对证书的引用；如果其他服务使用了这些路径，请不要勾选清理。
+清理后的证书文件无法通过配置历史恢复，重新启用相关配置可能需要重新申请证书。
+若配置发布或证书清理失败，页面会提示；后续「重新下发」只发布配置，不会自动补做证书清理。
 > 私钥权限是 0600、属主 caddy，读它需要 root。
 
 ### 升级 Caddy 内核
@@ -90,7 +98,8 @@ curl -fsSL https://raw.githubusercontent.com/lqlcj/CaddyUI/main/uninstall.sh | s
 给多少、怎么给是关键：
 
 安装脚本会放一个 root 拥有的助手脚本 `/usr/local/lib/caddyui/upgrade-caddy.sh`，
-并只给 caddy 用户放行这一个脚本的 sudo 权限。**这个脚本不接受任何参数** ——
+由 `caddyui-upgrade@.service` 独立执行。面板只能通过 root:caddy、0660 权限的
+`/run/caddyui-upgrade.sock` 请求检查或升级。**升级脚本不接受任何参数** ——
 下载哪个仓库、什么版本、校验和对不对，全部由脚本自己决定，面板插不上手。
 
 所以这条授权给出去的能力只有一个：「把 Caddy 升级到官方最新版」。
@@ -99,8 +108,9 @@ curl -fsSL https://raw.githubusercontent.com/lqlcj/CaddyUI/main/uninstall.sh | s
 反过来，如果助手设计成「装我给你的这个文件」，面板就能喂给它任意二进制，
 等于直接送 root。这条边界不能松，改那个脚本之前请先读它开头的注释。
 
-装不上 sudo 授权的机器（没有 sudo、visudo 校验没过）会在设置页显示
-「一键升级不可用」并给出手动命令，而不是给个点了会报错的按钮。
+升级 socket 没有启用、权限不正确或服务无响应时，设置页显示「一键升级不可用」。
+面板保留 `NoNewPrivileges=true` 和 `ProtectSystem=full`，不在面板进程内提权。
+更新已有安装时需要重新运行安装脚本，安装新服务并移除旧 sudoers 授权。
 包管理器装的 Caddy 也会被助手拒绝接管，让你走 `apt upgrade caddy`。
 
 ### 界面
@@ -222,7 +232,7 @@ blog.example.com, www.blog.example.com {
   （深色模式因此走 cookie + 服务端渲染，而不是内联 script）
 - Admin API 走 unix socket，本机其它进程连端口都扫不到
 - 证书那块只读路径和有效期，**证书内容和私钥永远不会出现在页面上**
-- 升级 Caddy 只走官方仓库 + SHA-512 校验；面板拿到的 sudo 权限被限死在
+- 升级 Caddy 只走官方仓库 + SHA-512 校验；面板的升级 socket 权限被限死在
   「运行那一个不带参数的助手脚本」上，换不成任意命令
 
 ---
@@ -242,17 +252,46 @@ internal/
   caddybin/                  读 Caddy 版本、查官方最新版、触发升级
   app/service.go             渲染 + 下发 + 记录版本 + 回滚
   web/                       路由、会话、CSRF、主题、各页面 handler
-web/
-  templates/                 Go 模板，服务端渲染
-  static/                    手写 CSS + JS，无框架无构建步骤
+frontend/
+  src/pages/                 React 页面：登录、站点、配置、设置
+  src/components/ui/         shadcn/ui 组件（Radix + Tailwind CSS）
+  src/lib/                   页面数据、请求和类型定义
+  tests/                     Playwright 浏览器回归测试
+web/dist/                    Vite 构建产物，嵌入 Go 二进制
 deploy/
   caddy.service              Caddy 的 systemd 单元
   caddyui.service            面板的 systemd 单元
-  upgrade-caddy.sh           root 拥有的升级助手（面板通过 sudo 调它）
-  caddyui.sudoers            只放行上面那一个脚本的 sudo 授权
+  upgrade-caddy.sh           root 拥有的升级助手
+  upgrade-request.sh         固定 CHECK / UPGRADE 请求处理
+  caddyui-upgrade.socket     受文件权限保护的升级入口
+  caddyui-upgrade@.service   独立 root 升级服务
   ```
 
-前端没有 node_modules，没有打包步骤，`go build` 一条命令出成品。
+前端使用 React 19、TypeScript、Vite、Tailwind CSS 和 shadcn/ui。
+构建资源嵌入 Go 二进制，安装 Release 的服务器不需要 Node.js，也不需要单独部署前端。
+
+## 本地开发与构建
+
+源码构建需要 Go 1.26.8+、Node.js 22.12+（推荐 24 LTS）和 npm：
+
+```sh
+npm --prefix frontend ci
+npm --prefix frontend run build
+go test ./...
+go build .
+go run . -listen 127.0.0.1:8082 -data ./data/dev -caddy 127.0.0.1:12019
+```
+
+使用独立的开发 Caddy 实例；面板启动和保存站点时会同步配置。
+前端热更新开发：先启动上述 Go 服务，再运行 `npm --prefix frontend run dev`，访问 Vite 输出的地址。
+开发代理默认指向 `127.0.0.1:8082`，可用 `CADDYUI_DEV_BACKEND` 修改。
+
+页面数据通过同一路由的 `Accept: application/json` 请求获取；表单仍由 Go 校验会话、CSRF 和参数。
+前端不保存登录令牌，沿用 HttpOnly 会话 Cookie。普通访问返回 React 入口，深层页面支持直接刷新。
+
+`npm --prefix frontend run check` 检查 TypeScript。
+`npm --prefix frontend test` 运行浏览器测试；先安装测试浏览器：`cd frontend && npx playwright install chromium`。
+一键安装优先使用预编译 Release；回退到源码编译时也需要 Node.js 和 npm。
 
 ## 启动参数
 
@@ -310,7 +349,7 @@ Caddy 实际监听的一致。一键安装脚本装出来的是匹配的。
 先确认云厂商安全组放行了 81 端口 —— 这是最常见的原因。
 
 **设置页显示「一键升级不可用」**
-说明 sudo 授权没装上：可能系统里没有 sudo，也可能 visudo 校验没通过。
+检查 `systemctl status caddyui-upgrade.socket`，确认升级入口已启用且 caddy 用户有访问权限。
 重新跑一次安装脚本通常能修好。实在不行就 SSH 上去手动升级，
 面板上会显示当前和最新版本，心里有数。
 

@@ -1,0 +1,14 @@
+[Unit]
+Description=CaddyUI privileged Caddy upgrade socket
+
+[Socket]
+ListenStream=/run/caddyui-upgrade.sock
+SocketUser=root
+SocketGroup=caddy
+SocketMode=0660
+Accept=yes
+MaxConnections=8
+RemoveOnStop=yes
+
+[Install]
+WantedBy=sockets.target

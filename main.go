@@ -33,7 +33,7 @@ import (
 //go:embed web
 var assets embed.FS
 
-const version = "0.3.0"
+const version = "1.0.0"
 
 // envOr 依次尝试给定的环境变量名。旧的 RELAY_* 留着是为了让从 Relay 升级上来
 // 的机器不改 systemd 单元也能跑起来。

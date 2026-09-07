@@ -140,7 +140,7 @@ func (s *Server) handleCaddyCheck(w http.ResponseWriter, r *http.Request) {
 
 // handleCaddyUpgrade 触发一次升级。
 //
-// 真正干活的是 root 拥有的助手脚本，面板只是通过 sudo 把它叫起来 ——
+// 真正干活的是独立的 root 升级服务，面板通过受权限保护的 Unix socket 请求 ——
 // 权限边界的理由写在 deploy/upgrade-caddy.sh 的注释里。
 //
 // 任务是异步跑的：下载加重启在慢机器上可能要一分钟以上，而且升级过程中 Caddy

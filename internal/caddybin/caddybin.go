@@ -2,18 +2,18 @@
 //
 // 升级动作本身不在这里做 —— 面板以非特权的 caddy 用户运行，写不了
 // /usr/bin/caddy 也重启不了服务。真正干活的是一个 root 拥有的助手脚本，
-// 这里只负责通过 sudo 把它叫起来，并把输出收集给界面看。
+// 这里只通过受权限保护的 Unix socket 请求独立的 systemd 服务并收集结果。
 //
 // 权限边界的设计写在 deploy/upgrade-caddy.sh 的注释里，改这块之前先读那段。
 package caddybin
 
 import (
 	"bufio"
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"os"
 	"os/exec"
@@ -25,9 +25,8 @@ import (
 	"time"
 )
 
-// HelperPath 是 install.sh 放置助手脚本的位置。sudoers 里授权的也是这个路径，
-// 两处必须一致。
-const HelperPath = "/usr/local/lib/caddyui/upgrade-caddy.sh"
+// UpgradeSocket must match deploy/caddyui-upgrade.socket.
+const UpgradeSocket = "/run/caddyui-upgrade.sock"
 
 // 官方仓库，硬编码。助手脚本里也硬编码了一份 —— 那份才是真正生效的，
 // 这份只用来查版本和在界面上显示来源。
@@ -216,18 +215,15 @@ func (m *Manager) CachedLatest() *Release {
 	return m.latest
 }
 
-// HelperAvailable 判断「一键升级」这条路通不通：助手脚本在不在、sudo 有没有。
+// HelperAvailable probes the independently privileged service without starting an upgrade.
 //
 // 不通的时候界面上要如实说明并给出手动命令，而不是给个点了会报错的按钮。
 func (m *Manager) HelperAvailable() (bool, string) {
 	if runtime.GOOS != "linux" {
 		return false, "一键升级只支持 Linux（当前系统：" + runtime.GOOS + "）"
 	}
-	if st, err := os.Stat(HelperPath); err != nil || st.IsDir() {
-		return false, "升级助手没装上（" + HelperPath + " 不存在），重新跑一次安装脚本即可补上"
-	}
-	if _, err := exec.LookPath("sudo"); err != nil {
-		return false, "系统里没有 sudo，面板拿不到升级所需的权限"
+	if _, err := helperRequest(UpgradeSocket, "CHECK", 5*time.Second); err != nil {
+		return false, "升级服务不可用，请检查 caddyui-upgrade.socket 或重新运行安装脚本：" + err.Error()
 	}
 	return true, ""
 }
@@ -262,38 +258,15 @@ func (m *Manager) StartUpgrade() error {
 }
 
 func (m *Manager) runUpgrade() {
-	// 给足时间：慢网下载 40MB 的包可能要好几分钟。
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-	defer cancel()
-
-	// -n 不允许交互式输密码：拿不到权限就立刻失败，而不是挂在那儿等输入。
-	cmd := exec.CommandContext(ctx, "sudo", "-n", HelperPath)
-
-	// 只传一个干净的最小环境，不用 os.Environ()。
-	//
-	// sudo 默认开着 env_reset，本来就会把环境洗一遍；但那是别人机器上的配置，
-	// 不该拿自己的安全性去赌。万一某台机器关掉了 env_reset，从面板进程继承过去
-	// 的 BASH_ENV 会被 bash 在脚本第一行之前就 source 掉 —— 那是直接的 root
-	// 代码执行，而且脚本内部拦不住（等它开始跑已经晚了）。
-	// 这里干脆什么都不给，从源头断掉。
-	cmd.Env = []string{
-		"PATH=/usr/sbin:/usr/bin:/sbin:/bin",
-		"LC_ALL=C",
-	}
-
-	var buf bytes.Buffer
-	cmd.Stdout = &buf
-	cmd.Stderr = &buf
-
-	err := cmd.Run()
+	output, err := helperRequest(UpgradeSocket, "UPGRADE", 15*time.Minute)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.job.FinishedAt = time.Now()
-	m.job.Log = tail(buf.String(), 60)
+	m.job.Log = tail(output, 60)
 	if err != nil {
 		m.job.State = StateFailed
-		m.job.Err = friendlySudoErr(err, buf.String())
+		m.job.Err = err.Error()
 		return
 	}
 	m.job.State = StateOK
@@ -301,22 +274,48 @@ func (m *Manager) runUpgrade() {
 	m.latest = nil
 }
 
-// friendlySudoErr 把 sudo 的常见失败翻译成人话。
-func friendlySudoErr(err error, output string) string {
-	low := strings.ToLower(output)
-	switch {
-	case strings.Contains(low, "password is required"),
-		strings.Contains(low, "sudo: a password is required"):
-		return "sudo 要求输入密码，说明授权文件没生效。重新跑一次安装脚本可以修复。"
-	case strings.Contains(low, "not allowed to execute"),
-		strings.Contains(low, "may not run"):
-		return "sudo 拒绝了这个命令，说明 /etc/sudoers.d/caddyui 缺失或被改过。重新跑一次安装脚本可以修复。"
+func helperRequest(socket, command string, timeout time.Duration) (string, error) {
+	if command != "CHECK" && command != "UPGRADE" {
+		return "", fmt.Errorf("invalid upgrade command")
 	}
-	// 助手脚本自己的报错已经写在输出里了，取最后一行有内容的当摘要。
-	if line := lastLine(output); line != "" {
-		return line
+	conn, err := net.DialTimeout("unix", socket, 3*time.Second)
+	if err != nil {
+		return "", err
 	}
-	return err.Error()
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(timeout)); err != nil {
+		return "", err
+	}
+	if _, err := io.WriteString(conn, command+"\n"); err != nil {
+		return "", err
+	}
+	raw, err := io.ReadAll(io.LimitReader(conn, 128*1024+1))
+	if err != nil {
+		return "", err
+	}
+	if len(raw) > 128*1024 {
+		return "", fmt.Errorf("upgrade response too large")
+	}
+	response := strings.TrimSpace(string(raw))
+	if command == "CHECK" {
+		if response != "READY" {
+			return "", fmt.Errorf("upgrade service did not report readiness")
+		}
+		return "", nil
+	}
+	index := strings.LastIndex(response, "\nCADDYUI-UPGRADE-EXIT ")
+	if index < 0 {
+		return response, fmt.Errorf("升级连接中断，结果未知；请检查升级服务日志和 Caddy 状态")
+	}
+	output := strings.TrimSpace(response[:index])
+	status := strings.TrimPrefix(response[index+1:], "CADDYUI-UPGRADE-EXIT ")
+	if status != "0" {
+		if line := lastLine(output); line != "" {
+			return output, fmt.Errorf("%s", line)
+		}
+		return output, fmt.Errorf("升级失败（退出码 %s）", status)
+	}
+	return output, nil
 }
 
 // tail 只保留最后 n 行，防止把整篇输出灌进页面。

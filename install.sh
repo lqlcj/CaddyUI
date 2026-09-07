@@ -35,7 +35,7 @@ HELPER_DIR=/usr/local/lib/caddyui
 HELPER="$HELPER_DIR/upgrade-caddy.sh"
 SUDOERS=/etc/sudoers.d/caddyui
 PANEL_PORT="${PANEL_PORT:-81}"
-GO_MIN=1.25.0
+GO_MIN=1.26.8
 
 info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m警告:\033[0m %s\n' "$*"; }
@@ -184,6 +184,16 @@ build_from_source() {
 
   ensure_go
 
+  if [ ! -f "$TMP/src/web/dist/index.html" ]; then
+    command -v node >/dev/null 2>&1 && command -v npm >/dev/null 2>&1 \
+      || die "源码构建需要 Node.js 22.12+（推荐 24 LTS）和 npm。请安装后重试，或等待预编译 Release。"
+    node -e 'const [major, minor] = process.versions.node.split(".").map(Number); process.exit(major > 22 || (major === 22 && minor >= 12) ? 0 : 1)' \
+      || die "Node.js 版本过旧，源码构建需要 22.12+（推荐 24 LTS）。"
+    info "构建 React 前端……"
+    ( cd "$TMP/src/frontend" && npm ci --cache "$TMP/npm-cache" && npm run build ) \
+      || die "前端构建失败"
+  fi
+
   info "编译中，第一次要拉依赖，可能要几分钟……"
   ( cd "$TMP/src" \
     && env HOME="$TMP" GOFLAGS=-mod=mod GOTOOLCHAIN=local \
@@ -250,7 +260,7 @@ fi
 # ---------- 升级助手（面板里那个「升级 Caddy 内核」按钮） ----------
 #
 # 面板以非特权的 caddy 用户运行，写不了 /usr/bin/caddy 也重启不了服务。
-# 这里装一个 root 拥有的助手脚本，并只给 caddy 用户放行这一个脚本的 sudo 权限。
+# 独立的 systemd 服务执行升级，面板通过仅 caddy 组可访问的 Unix socket 请求。
 #
 # 脚本不接受任何参数 —— 下载哪个仓库、什么版本、校验和对不对全由它自己决定，
 # 所以这条授权给出去的能力只有「把 Caddy 升级到官方最新版」这一件事。
@@ -260,28 +270,18 @@ info "安装 Caddy 升级助手"
 fetch deploy/upgrade-caddy.sh "$TMP/upgrade-caddy.sh"
 
 # 目录和脚本都必须 root 所有：只要 caddy 用户能改这个文件，
-# 下面那条 sudoers 规则就等于直接送 root。
+# 独立升级服务就会执行被替换的代码。
 install -d -o root -g root -m 0755 "$HELPER_DIR"
 install -o root -g root -m 0755 "$TMP/upgrade-caddy.sh" "$HELPER"
 
-if command -v sudo >/dev/null 2>&1; then
-  fetch deploy/caddyui.sudoers "$TMP/caddyui.sudoers"
-
-  # sudoers.d 里有语法错误会让整个 sudo 拒绝工作 —— 那可是能把人锁在
-  # 服务器外面的事故。所以先用 visudo 验一遍，不通过就干脆不装。
-  if command -v visudo >/dev/null 2>&1; then
-    if visudo -cf "$TMP/caddyui.sudoers" >/dev/null 2>&1; then
-      install -o root -g root -m 0440 "$TMP/caddyui.sudoers" "$SUDOERS"
-      info "已授权面板升级 Caddy（$SUDOERS）"
-    else
-      warn "sudoers 片段没通过 visudo 校验，跳过安装 —— 面板里的一键升级会显示不可用"
-    fi
-  else
-    warn "系统里没有 visudo，不敢直接写 sudoers.d，跳过 —— 面板里的一键升级会显示不可用"
-  fi
-else
-  warn "系统里没有 sudo，面板的一键升级会显示不可用（其它功能不受影响）"
-fi
+fetch deploy/upgrade-request.sh "$TMP/upgrade-request.sh"
+install -o root -g root -m 0755 "$TMP/upgrade-request.sh" "$HELPER_DIR/upgrade-request.sh"
+for unit in caddyui-upgrade.socket caddyui-upgrade@.service; do
+  fetch "deploy/$unit" "$TMP/$unit"
+  install -o root -g root -m 0644 "$TMP/$unit" "$SYSTEMD_DIR/$unit"
+done
+# Remove the obsolete privilege path when upgrading an existing installation.
+rm -f "$SUDOERS"
 
 # ---------- systemd ----------
 
@@ -297,6 +297,7 @@ sed "s|-listen 0.0.0.0:81|-listen 0.0.0.0:${PANEL_PORT}|" \
 chmod 0644 "$SYSTEMD_DIR/caddyui.service"
 
 systemctl daemon-reload
+systemctl enable --now caddyui-upgrade.socket
 systemctl reset-failed relay >/dev/null 2>&1 || true
 systemctl enable --now caddy
 sleep 1

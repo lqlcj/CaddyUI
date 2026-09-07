@@ -38,6 +38,8 @@ func (s *Store) AddConfigVersion(caddyfile string, ok bool, reason, detail strin
 	_, _ = s.db.Exec(
 		`DELETE FROM config_versions WHERE id NOT IN (
 			SELECT id FROM config_versions ORDER BY id DESC LIMIT ?
+		 ) AND id NOT IN (
+			SELECT id FROM config_versions WHERE ok = 1 ORDER BY id DESC LIMIT 1
 		 )`, keepVersions)
 
 	return id, nil
@@ -63,7 +65,11 @@ func (s *Store) ConfigVersions(limit int) ([]*ConfigVersion, error) {
 		limit = keepVersions
 	}
 	rows, err := s.db.Query(
-		`SELECT `+versionCols+` FROM config_versions ORDER BY id DESC LIMIT ?`, limit)
+		`SELECT `+versionCols+` FROM config_versions WHERE id IN (
+			SELECT id FROM config_versions ORDER BY id DESC LIMIT ?
+		) OR id IN (
+			SELECT id FROM config_versions WHERE ok = 1 ORDER BY id DESC LIMIT 1
+		) ORDER BY id DESC`, limit)
 	if err != nil {
 		return nil, err
 	}

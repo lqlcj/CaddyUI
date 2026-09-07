@@ -22,7 +22,7 @@ type Site struct {
 	ForceHTTPS     bool // http 请求 301 跳到 https
 	SkipTLSVerify  bool // 上游是自签证书时用
 	BasicUser      string
-	BasicHash      string // bcrypt，Caddy 直接吃这个格式
+	BasicHash      string `json:"-"` // bcrypt is only used when rendering Caddy configuration.
 	Advanced       string // 原样插入站点块的 Caddyfile 片段
 	Note           string
 	CreatedAt      int64

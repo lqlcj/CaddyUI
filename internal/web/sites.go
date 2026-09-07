@@ -1,12 +1,14 @@
 package web
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
 
+	"caddyui/internal/certs"
 	"caddyui/internal/store"
 )
 
@@ -16,9 +18,20 @@ func (s *Server) handleSiteList(w http.ResponseWriter, r *http.Request) {
 		flashErr(w, "读取站点列表失败：%v", err)
 		sites = nil
 	}
+	enabledCount, httpsCount := 0, 0
+	for _, site := range sites {
+		if site.Enabled {
+			enabledCount++
+		}
+		if site.HTTPS {
+			httpsCount++
+		}
+	}
 	s.render(w, r, "sites", map[string]any{
-		"Sites":  sites,
-		"Status": s.svc.Status(),
+		"Sites":        sites,
+		"Status":       s.svc.Status(),
+		"EnabledCount": enabledCount,
+		"HTTPSCount":   httpsCount,
 	})
 }
 
@@ -69,12 +82,40 @@ func (s *Server) renderSiteForm(w http.ResponseWriter, r *http.Request, site *st
 	// 证书信息只在编辑已有站点时查——新建时域名还没定，更没有证书。
 	// 查的是磁盘上真实存在的文件，不是按规则拼出来的路径，所以显示出来的
 	// 地址一定能直接 scp / cat。
-	if !isNew && s.svc.Certs != nil && s.svc.Certs.Available() {
-		data["Certs"] = s.svc.Certs.LookupAll(site.DomainList())
-		data["CertRoot"] = s.svc.Certs.CertRoot()
+	if !isNew {
+		certData := s.siteCertificates(site)
+		data["Certs"] = certData.Certs
+		data["CertRoot"] = certData.CertRoot
+		data["CertAvailable"] = certData.CertAvailable
 	}
 
 	s.render(w, r, "site_form", data)
+}
+
+type siteCertificateData struct {
+	Certs         []certs.Info
+	CertRoot      string
+	CertAvailable bool
+}
+
+func (s *Server) siteCertificates(site *store.Site) siteCertificateData {
+	data := siteCertificateData{Certs: []certs.Info{}}
+	if s.svc.Certs != nil {
+		data.CertRoot = s.svc.Certs.CertRoot()
+		data.CertAvailable = s.svc.Certs.Available()
+		data.Certs = s.svc.Certs.LookupAll(site.DomainList())
+	}
+	return data
+}
+
+func (s *Server) handleSiteCertificates(w http.ResponseWriter, r *http.Request) {
+	site, ok := s.siteFromPath(w, r)
+	if !ok {
+		return
+	}
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(s.siteCertificates(site))
 }
 
 func (s *Server) handleSiteCreate(w http.ResponseWriter, r *http.Request) {
@@ -139,7 +180,39 @@ func (s *Server) handleSiteDelete(w http.ResponseWriter, r *http.Request) {
 		redirect(w, r, "/sites")
 		return
 	}
-	s.applyAndFlash(w, "删除站点 "+site.PrimaryDomain(), nil)
+	if r.PostFormValue("cleanup_certs") != "1" {
+		s.applyAndFlash(w, "删除站点 "+site.PrimaryDomain(), nil)
+		redirect(w, r, "/sites")
+		return
+	}
+	if err := s.svc.Apply("删除站点 " + site.PrimaryDomain()); err != nil {
+		flashWarn(w, "站点记录已删除，但配置发布未完整成功：%v。证书未清理，请检查 Caddy 状态并在「配置」页重新下发。", err)
+		redirect(w, r, "/sites")
+		return
+	}
+	remaining, err := s.svc.Store.Sites()
+	if err != nil {
+		flashWarn(w, "站点删除已生效，但无法检查其他站点，证书未清理：%v", err)
+		redirect(w, r, "/sites")
+		return
+	}
+	var domains []string
+	for _, other := range remaining {
+		if strings.TrimSpace(other.Advanced) != "" {
+			flashWarn(w, "站点删除已生效。其他站点存在自定义配置，无法确认是否引用证书，本次保留证书。")
+			redirect(w, r, "/sites")
+			return
+		}
+		domains = append(domains, other.DomainList()...)
+	}
+	result, err := s.svc.Certs.Cleanup(site.DomainList(), domains)
+	if err != nil {
+		flashWarn(w, "站点删除已生效，已清理 %d 组证书；部分证书未能清理：%v", result.Removed, err)
+	} else if result.Kept > 0 {
+		flashWarn(w, "站点删除已生效，已清理 %d 组证书，保留 %d 组共用或无法确认归属的证书。", result.Removed, result.Kept)
+	} else {
+		flashOK(w, "站点删除已生效，已清理 %d 组独占证书及对应私钥、元数据。", result.Removed)
+	}
 	redirect(w, r, "/sites")
 }
 
