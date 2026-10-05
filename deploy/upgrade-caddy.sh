@@ -1,224 +1,174 @@
 #!/usr/bin/env bash
-#
-# CaddyUI —— Caddy 内核升级助手
-#
-# 这个脚本由独立的 systemd 升级服务以 root 身份运行。
-#
-# ─────────────────────────────────────────────────────────────────────────
-# 为什么要单独搞一个脚本，而不是让面板自己去下载安装？
-#
-# 面板是以非特权的 caddy 用户跑的，它写不了 /usr/bin/caddy，也重启不了服务。
-# 要做到「点一下就升级」，就必须给它一点特权。给多少、怎么给，是这里的关键：
-#
-#   本脚本不接受任何参数。
-#
-# 下载哪个仓库、什么版本、校验和对不对，全部由脚本自己决定，面板插不上手。
-# 所以即使面板被完全攻破，攻击者能做的也只有「把 Caddy 升级到官方最新版」
-# 这一件事 —— 这不是提权。
-#
-# 反过来，如果脚本设计成「装我给你的这个文件」，那面板就能喂给它任意二进制，
-# 等于直接送 root。这条边界不能松。
-#
-# 面板通过 caddyui-upgrade.socket 请求固定操作，不继承面板的环境或沙箱。
-#
-# 另外，本脚本必须是 root:root 0755，所在目录也必须 root 所有 ——
-# caddy 用户不能修改这些文件。
-# install.sh 每次都会重新设置这些权限。
-# ─────────────────────────────────────────────────────────────────────────
-
+# Root-owned, argument-free helper for the standard CaddyUI installation.
+# The socket caller cannot select a URL, binary, path, version or environment.
+# All Caddy commands, including configuration validation, run as user caddy.
 set -euo pipefail
-
-# 固定 PATH，不用继承来的。
-#
-# 脚本要调 curl / tar / systemctl / sha512sum 等一堆外部命令，如果 PATH 能被
-# 调用方左右，那随便放一个假的 curl 进去就是 root 代码执行。sudo 的 secure_path
-# 默认会重置 PATH，但这是别人的配置，不该拿自己的安全性去赌。
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
+umask 077
 
-# 只认官方仓库，硬编码，不接受任何外部输入。
-REPO="caddyserver/caddy"
-API="https://api.github.com/repos/${REPO}/releases/latest"
-DL_BASE="https://github.com/${REPO}/releases/download"
-
+API=https://api.github.com/repos/caddyserver/caddy/releases/latest
+DL_BASE=https://github.com/caddyserver/caddy/releases/download
+CADDY_BIN=/usr/bin/caddy
+AUTOSAVE=/var/lib/caddy/.config/caddy/autosave.json
+BACKUP=/usr/bin/caddy.bak
 SERVICE=caddy
-
-log()  { printf '%s\n' "$*"; }
-die()  { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
-
+log() { printf '%s\n' "$*"; }
+die() { printf 'ERROR: %s\n' "$*" >&2; exit 1; }
 [ "$(id -u)" -eq 0 ] || die "必须由 root 或独立的升级服务运行"
 [ "$#" -eq 0 ] || die "升级助手不接受参数"
-
-# Serialize across panel restarts and simultaneous socket connections.
+for command in curl tar gzip sha512sum flock runuser timeout stat sort; do
+  command -v "$command" >/dev/null || die "缺少命令：$command"
+done
 exec 9>/run/caddyui-upgrade.lock
 flock -n 9 || die "已有升级任务正在运行"
 
-command -v curl >/dev/null 2>&1 || die "需要 curl"
-command -v tar  >/dev/null 2>&1 || die "需要 tar"
-
-# ---------- 找 caddy 在哪 ----------
-#
-# 刻意不做成环境变量或参数：这个值最后会变成「往哪里写文件」，
-# 调用方能控制它就等于能以 root 覆盖任意文件（把 /usr/bin/sudo 换掉之类）。
-# 所以由脚本自己找，找不到就不干活。
-CADDY_BIN=""
-for c in /usr/bin/caddy /usr/local/bin/caddy; do
-  if [ -x "$c" ]; then CADDY_BIN="$c"; break; fi
-done
-if [ -z "$CADDY_BIN" ]; then
-  CADDY_BIN="$(command -v caddy 2>/dev/null || true)"
+# Never follow symlinks or execute an existing binary as root.
+[ -f "$CADDY_BIN" ] && [ -x "$CADDY_BIN" ] && [ ! -L "$CADDY_BIN" ] \
+  || die "仅支持 /usr/bin/caddy 的普通文件安装，不支持符号链接或自定义路径"
+[ "$(stat -c %u "$CADDY_BIN")" = 0 ] || die "Caddy 二进制必须由 root 所有"
+if runuser -u caddy -- test -w "$CADDY_BIN" || runuser -u caddy -- test -w /usr/bin; then
+  die "caddy 用户可以修改二进制或安装目录，拒绝升级"
 fi
-[ -n "$CADDY_BIN" ] || die "找不到 caddy 可执行文件，无法升级"
-
-# 顺着符号链接走到真身，免得把链接本身覆盖掉。
-if [ -L "$CADDY_BIN" ]; then
-  CADDY_BIN="$(readlink -f "$CADDY_BIN")" || die "解析 $CADDY_BIN 的符号链接失败"
+if command -v dpkg-query >/dev/null && dpkg-query -S "$CADDY_BIN" >/dev/null 2>&1; then
+  die "Caddy 由包管理器安装，请使用 apt 升级"
 fi
-log "Caddy 位置：$CADDY_BIN"
-
-SHA512=""
-if command -v sha512sum >/dev/null 2>&1; then
-  SHA512="sha512sum"
-elif command -v shasum >/dev/null 2>&1; then
-  SHA512="shasum -a 512"
-else
-  die "找不到 sha512sum，无法校验下载文件，拒绝继续"
+if command -v rpm >/dev/null && rpm -qf "$CADDY_BIN" >/dev/null 2>&1; then
+  die "Caddy 由包管理器安装，请使用 dnf / yum 升级"
 fi
+[ "$(systemctl show -p User --value "$SERVICE")" = caddy ] \
+  || die "服务必须以 caddy 用户运行"
+start="$(systemctl show -p ExecStart --value "$SERVICE")"
+[[ "$start" == *"argv[]=/usr/bin/caddy run --resume --config /etc/caddy/bootstrap.Caddyfile --adapter caddyfile ;"* ]] \
+  || die "服务启动命令不是标准 --resume 配置，请手动升级"
+environment="$(systemctl show -p Environment --value "$SERVICE")"
+[[ "$environment" != *HOME=* && "$environment" != *XDG_* ]] \
+  || die "服务使用自定义 HOME/XDG 路径，请手动升级"
+[ -z "$(systemctl show -p EnvironmentFiles --value "$SERVICE")" ] \
+  || die "服务使用自定义环境文件，请手动升级"
+systemctl is-active --quiet "$SERVICE" || die "Caddy 未运行，请先恢复服务"
 
-# ---------- 架构 ----------
+as_caddy() { runuser -u caddy -- timeout 30 "$@"; }
+CURRENT="$(as_caddy "$CADDY_BIN" version | awk 'NR == 1 {print $1}')" \
+  || die "无法读取当前版本"
+[[ "$CURRENT" =~ ^v2\.[0-9]+\.[0-9]+$ ]] \
+  || die "仅自动升级稳定版 Caddy 2，当前版本：$CURRENT"
+modules="$(as_caddy "$CADDY_BIN" list-modules --skip-standard)" \
+  || die "无法检查 Caddy 插件"
+[ -z "$modules" ] || die "检测到额外或未知插件，官方标准版会丢失插件，请手动升级"
 
 case "$(uname -m)" in
-  x86_64|amd64)  ARCH=amd64 ;;
+  x86_64|amd64) ARCH=amd64 ;;
   aarch64|arm64) ARCH=arm64 ;;
-  armv7l)        ARCH=armv7 ;;
-  armv6l)        ARCH=armv6 ;;
-  *) die "不支持的 CPU 架构: $(uname -m)" ;;
+  armv7l) ARCH=armv7 ;;
+  armv6l) ARCH=armv6 ;;
+  *) die "不支持的 CPU 架构" ;;
 esac
-
-# ---------- 别和包管理器打架 ----------
-#
-# 如果 caddy 是 apt/yum 装的，直接覆盖二进制会让包管理器的记录和实际文件对不上，
-# 下次 apt upgrade 可能把它换回去、也可能报冲突。这种情况让用户自己走包管理器。
-
-if [ -e "$CADDY_BIN" ]; then
-  OWNER=""
-  command -v dpkg >/dev/null 2>&1 && OWNER="$(dpkg -S "$CADDY_BIN" 2>/dev/null || true)"
-  command -v rpm  >/dev/null 2>&1 && OWNER="${OWNER}$(rpm -qf "$CADDY_BIN" 2>/dev/null || true)"
-  if [ -n "$OWNER" ]; then
-    die "$CADDY_BIN 是包管理器安装的，请用 apt upgrade caddy / yum update caddy 升级，本脚本不动它"
-  fi
-fi
-
 TMP="$(mktemp -d /var/tmp/caddyui-upgrade.XXXXXX)"
-trap 'rm -rf "$TMP"' EXIT
+# caddy can read selected root-owned files but cannot change them.
+chmod 0711 "$TMP"
+installed=0
+committed=0
 
-# ---------- 查最新版本 ----------
+atomic_install() {
+  local source="$1" target="$2" staged
+  staged="$(mktemp "${target}.XXXXXX")" || return 1
+  if ! install -o root -g root -m 0755 "$source" "$staged" || ! mv -fT "$staged" "$target"; then
+    rm -f "$staged"
+    return 1
+  fi
+}
+restore_config() {
+  # The destination is inside caddy's writable home; never write it as root.
+  as_caddy /bin/sh -c '
+    temporary=$(mktemp "${2}.restore.XXXXXX") || exit 1
+    trap '\''rm -f "$temporary"'\'' EXIT
+    cat "$1" > "$temporary" && chmod 0600 "$temporary" && mv -f "$temporary" "$2"
+  ' sh "$TMP/config.json" "$AUTOSAVE"
+}
+healthy() {
+  systemctl is-active --quiet "$SERVICE" &&
+    as_caddy curl -q -fsS --noproxy '*' --max-time 5 \
+      --unix-socket /run/caddy/admin.sock http://localhost/config/ -o /dev/null
+}
+cleanup() {
+  local status=$?
+  trap - EXIT HUP INT TERM
+  if [ "$installed" = 1 ] && [ "$committed" = 0 ]; then
+    log "升级未完成，尝试恢复旧内核及升级前配置……"
+    if timeout 30 systemctl stop "$SERVICE" &&
+       atomic_install "$BACKUP" "$CADDY_BIN" &&
+       restore_config &&
+       timeout 60 systemctl restart "$SERVICE" &&
+       healthy; then
+      log "已恢复旧内核和配置，Caddy 与 Admin API 检查通过。请检查网站。"
+    else
+      log "ERROR: 自动恢复未确认成功，请立即通过 SSH 检查：journalctl -u caddy -n 50"
+    fi
+    status=1
+  fi
+  rm -rf "$TMP"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+download() {
+  timeout "$(($3 + 30))" curl -q -fsSL --proto '=https' --proto-redir '=https' \
+    --retry 2 --retry-max-time 330 --connect-timeout 15 --max-time "$3" \
+    --max-filesize "$4" "$1" -o "$2"
+}
 
-log "正在查询 Caddy 官方最新版本……"
-curl -fsSL --retry 2 --max-time 30 "$API" -o "$TMP/rel.json" \
-  || die "连不上 GitHub API，检查服务器网络"
-
-TAG="$(grep -oE '"tag_name" *: *"[^"]*"' "$TMP/rel.json" | head -1 | sed 's/.*"tag_name" *: *"//;s/"//')"
-[ -n "$TAG" ] || die "没能从 GitHub 返回里解析出版本号"
-
-# 版本号会被拼进下载 URL，必须严格校验形状。
-# 这是防注入的关键一步：万一 API 返回了奇怪的东西，到这里就被拦住。
-echo "$TAG" | grep -qE '^v[0-9]+\.[0-9]+\.[0-9]+$' \
-  || die "版本号格式不对（$TAG），拒绝继续"
-
-VER="${TAG#v}"
-log "最新版本：$TAG"
-
-CURRENT=""
-if [ -x "$CADDY_BIN" ]; then
-  CURRENT="$("$CADDY_BIN" version 2>/dev/null | head -1 | awk '{print $1}' || true)"
-  log "当前版本：${CURRENT:-未知}"
-fi
-
-if [ -n "$CURRENT" ] && [ "$CURRENT" = "$TAG" ]; then
+log "当前版本：$CURRENT；正在查询官方最新稳定版……"
+download "$API" "$TMP/release.json" 30 2097152 || die "查询 GitHub 失败"
+TAG="$(sed -n 's/.*"tag_name" *: *"\([^"]*\)".*/\1/p' "$TMP/release.json" | head -1)"
+[[ "$TAG" =~ ^v2\.[0-9]+\.[0-9]+$ ]] || die "只允许稳定版 Caddy 2，收到：$TAG"
+if [ "$CURRENT" = "$TAG" ]; then
   log "已经是最新版本，无需升级。"
   exit 0
 fi
-
-# ---------- 下载 ----------
-
+[ "$(printf '%s\n%s\n' "$CURRENT" "$TAG" | sort -V | head -1)" = "$CURRENT" ] \
+  || die "官方最新版本比当前版本旧，拒绝降级"
+VER="${TAG#v}"
 TARBALL="caddy_${VER}_linux_${ARCH}.tar.gz"
 SUMS="caddy_${VER}_checksums.txt"
+log "下载 $TAG 并校验 SHA-512……"
+download "$DL_BASE/$TAG/$TARBALL" "$TMP/$TARBALL" 300 268435456 || die "下载二进制失败"
+download "$DL_BASE/$TAG/$SUMS" "$TMP/$SUMS" 60 2097152 || die "下载校验和失败"
+EXPECT="$(awk -v name="$TARBALL" '$2 == name {print $1}' "$TMP/$SUMS")"
+[[ "$EXPECT" =~ ^[0-9a-fA-F]{128}$ ]] || die "校验和条目缺失、重复或格式错误"
+ACTUAL="$(sha512sum "$TMP/$TARBALL" | awk '{print $1}')"
+[ "${EXPECT,,}" = "$ACTUAL" ] || die "SHA-512 不匹配，拒绝安装"
 
-log "下载 $TARBALL ……"
-curl -fsSL --retry 2 --max-time 300 "${DL_BASE}/${TAG}/${TARBALL}" -o "$TMP/$TARBALL" \
-  || die "下载失败：${DL_BASE}/${TAG}/${TARBALL}"
+# Extract to stdout: archive symlinks, modes and paths are never installed.
+tar -xOzf "$TMP/$TARBALL" caddy > "$TMP/caddy" || die "解包失败"
+chmod 0755 "$TMP/caddy"
+NEWVER="$(as_caddy "$TMP/caddy" version | awk 'NR == 1 {print $1}')" || die "新二进制无法运行"
+[ "$NEWVER" = "$TAG" ] || die "新二进制版本与下载版本不一致"
 
-log "下载校验和文件……"
-curl -fsSL --retry 2 --max-time 60 "${DL_BASE}/${TAG}/${SUMS}" -o "$TMP/$SUMS" \
-  || die "下载校验和失败，拒绝安装未经校验的文件"
+# Validate the actual resume configuration. Never provision user config as root.
+as_caddy cat "$AUTOSAVE" > "$TMP/config.json" || die "无法读取 autosave.json，请先下发配置"
+chown root:caddy "$TMP/config.json"
+chmod 0640 "$TMP/config.json"
+log "用新版本预检现有配置……"
+as_caddy "$TMP/caddy" validate --config "$TMP/config.json" \
+  || die "新版本不兼容现有配置，现有内核和运行服务保持不变"
+as_caddy cmp -s "$AUTOSAVE" "$TMP/config.json" \
+  || die "升级期间配置发生变化，请停止编辑后重试"
 
-# ---------- 校验 ----------
-#
-# Caddy 官方发的是 SHA-512。校验和文件和 tarball 都来自 GitHub 的同一个
-# release，走的都是 https，所以这一步主要防的是传输损坏和镜像投毒，
-# 不是防 GitHub 本身。
-
-log "校验 SHA-512 ……"
-EXPECT="$(grep -E "  ${TARBALL}\$" "$TMP/$SUMS" | awk '{print $1}' | head -1)"
-[ -n "$EXPECT" ] || die "校验和文件里没有 $TARBALL 这一项"
-
-ACTUAL="$(cd "$TMP" && $SHA512 "$TARBALL" | awk '{print $1}')"
-if [ "$EXPECT" != "$ACTUAL" ]; then
-  die "校验和不匹配！文件可能损坏或被篡改，已放弃。期望 $EXPECT，实际 $ACTUAL"
-fi
-log "校验通过"
-
-# ---------- 解包并试运行 ----------
-
-tar -xzf "$TMP/$TARBALL" -C "$TMP" caddy || die "解包失败"
-chmod +x "$TMP/caddy"
-
-NEWVER="$("$TMP/caddy" version 2>/dev/null | head -1 | awk '{print $1}' || true)"
-[ -n "$NEWVER" ] || die "新下载的二进制跑不起来（架构不对？），已放弃，没有动现有的 Caddy"
-log "新二进制自报版本：$NEWVER"
-
-# ---------- 备份 + 安装 ----------
-
-BACKUP=""
-if [ -e "$CADDY_BIN" ]; then
-  BACKUP="${CADDY_BIN}.bak"
-  cp -p "$CADDY_BIN" "$BACKUP" || die "备份现有二进制失败"
-  log "已备份到 $BACKUP"
-fi
-
-# 先写同目录的临时文件再 mv：mv 在同一文件系统上是原子的，
-# 不会出现「文件写了一半正好被执行」的情况。
-install -m 0755 "$TMP/caddy" "${CADDY_BIN}.new" || die "写入新二进制失败"
-mv -f "${CADDY_BIN}.new" "$CADDY_BIN" || die "替换二进制失败"
-log "已安装到 $CADDY_BIN"
-
-# ---------- 重启并确认 ----------
-
-log "重启 $SERVICE ……"
-if ! systemctl restart "$SERVICE"; then
-  log "重启失败，正在回滚……"
-  [ -n "$BACKUP" ] && cp -p "$BACKUP" "$CADDY_BIN" && systemctl restart "$SERVICE" || true
-  die "新版本起不来，已回滚到升级前的版本"
-fi
-
-# 给它一点时间把端口和配置都拉起来。
-sleep 3
-
-if ! systemctl is-active --quiet "$SERVICE"; then
-  log "服务没能保持运行，正在回滚……"
-  if [ -n "$BACKUP" ]; then
-    cp -p "$BACKUP" "$CADDY_BIN"
-    systemctl restart "$SERVICE" || true
-    sleep 2
-    if systemctl is-active --quiet "$SERVICE"; then
-      die "新版本起不来，已回滚，网站已恢复"
-    fi
-    die "新版本起不来，回滚后仍未恢复，请立即 SSH 上服务器执行：journalctl -u caddy -n 50"
-  fi
-  die "新版本起不来，且没有可回滚的备份"
-fi
-
-log "升级完成：${CURRENT:-未知} → $NEWVER"
-log "Caddy 已用 --resume 恢复升级前的配置，站点不受影响。"
-exit 0
+atomic_install "$CADDY_BIN" "$BACKUP" || die "备份旧内核失败"
+install -d -o root -g root -m 0700 /var/lib/caddyui-upgrade
+install -o root -g root -m 0600 "$TMP/config.json" /var/lib/caddyui-upgrade/config.json.bak \
+  || die "备份配置失败"
+installed=1
+atomic_install "$TMP/caddy" "$CADDY_BIN" || die "安装新内核失败"
+log "重启 Caddy（网站会短暂中断）……"
+timeout 60 systemctl restart "$SERVICE" || die "新版本启动失败"
+pid="$(systemctl show -p MainPID --value "$SERVICE")"
+for attempt in 1 2 3 4 5; do
+  sleep 2
+  healthy || die "新版本启动检查失败"
+  [ "$(systemctl show -p MainPID --value "$SERVICE")" = "$pid" ] || die "新版本发生异常重启"
+done
+committed=1
+log "升级完成：$CURRENT → $NEWVER；Caddy 和 Admin API 检查通过，请确认网站访问正常。"
+log "旧内核：$BACKUP；配置备份：/var/lib/caddyui-upgrade/config.json.bak"

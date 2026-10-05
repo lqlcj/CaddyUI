@@ -16,6 +16,11 @@ export function AuthPage({ data, setup }: { data: PageData; setup: boolean }) {
         </FieldDescription>
       </div>
       <ActionForm action={setup ? '/setup' : '/login'}>
+        {setup && (
+          <Field id="setup_token" label="初始化口令" hint="在服务器数据目录中读取 setup-token 文件；一键安装默认位于 /var/lib/caddyui/setup-token。">
+            <Input id="setup_token" name="setup_token" type="password" autoComplete="off" required />
+          </Field>
+        )}
         <Field
           id="username"
           label="邮箱"

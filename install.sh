@@ -16,6 +16,7 @@
 #
 # 可用环境变量：
 #   PANEL_PORT=81      面板端口
+#   PANEL_BIND=127.0.0.1  面板监听 IP；默认不开放公网
 #   CADDYUI_REF=main   要安装的分支或 tag
 
 set -euo pipefail
@@ -35,7 +36,9 @@ HELPER_DIR=/usr/local/lib/caddyui
 HELPER="$HELPER_DIR/upgrade-caddy.sh"
 SUDOERS=/etc/sudoers.d/caddyui
 PANEL_PORT="${PANEL_PORT:-81}"
+PANEL_BIND="${PANEL_BIND:-127.0.0.1}"
 GO_MIN=1.26.8
+DEPLOY_SRC=""
 
 info() { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m警告:\033[0m %s\n' "$*"; }
@@ -45,6 +48,14 @@ die()  { printf '\033[1;31m错误:\033[0m %s\n' "$*" >&2; exit 1; }
 command -v systemctl >/dev/null 2>&1 || die "这个脚本需要 systemd"
 command -v curl      >/dev/null 2>&1 || die "需要 curl，请先安装：apt install curl / yum install curl"
 command -v tar       >/dev/null 2>&1 || die "需要 tar，请先安装"
+command -v sha512sum >/dev/null 2>&1 || die "需要 sha512sum，请安装 coreutils"
+command -v sha256sum >/dev/null 2>&1 || die "需要 sha256sum，请安装 coreutils"
+command -v flock >/dev/null 2>&1 || die "需要 flock，请安装 util-linux"
+command -v runuser >/dev/null 2>&1 || die "需要 runuser，请安装 util-linux"
+[[ "$PANEL_PORT" =~ ^[0-9]{1,5}$ ]] && (( 10#$PANEL_PORT >= 1 && 10#$PANEL_PORT <= 65535 )) \
+  || die "PANEL_PORT 必须是 1~65535"
+[[ "$PANEL_BIND" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]] \
+  || die "PANEL_BIND 必须是 IPv4 地址"
 
 TMP="$(mktemp -d /var/tmp/caddyui-install.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
@@ -71,7 +82,9 @@ fi
 
 # fetch <相对仓库根的路径> <目标文件>
 fetch() {
-  if [ -n "$SRC" ] && [ -f "$SRC/$1" ]; then
+  if [ -n "$DEPLOY_SRC" ] && [ -f "$DEPLOY_SRC/$1" ]; then
+    cp "$DEPLOY_SRC/$1" "$2"
+  elif [ -n "$SRC" ] && [ -f "$SRC/$1" ]; then
     cp "$SRC/$1" "$2"
   else
     curl -fsSL --retry 3 "$RAW/$1" -o "$2" || die "下载 $1 失败"
@@ -110,8 +123,19 @@ else
         | head -1)"
   [ -n "$URL" ] || die "没找到 Caddy 的下载地址，请手动安装 Caddy 后重新运行本脚本"
 
-  curl -fsSL --retry 3 "$URL" -o "$TMP/caddy.tar.gz" || die "下载 Caddy 失败"
-  tar -xzf "$TMP/caddy.tar.gz" -C "$TMP" caddy
+  curl -q -fsSL --proto '=https' --proto-redir '=https' --retry 3 "$URL" -o "$TMP/caddy.tar.gz" || die "下载 Caddy 失败"
+  tag="${URL%/*}"
+  tag="${tag##*/}"
+  [[ "$tag" =~ ^v2\.[0-9]+\.[0-9]+$ ]] || die "只支持 Caddy 2 稳定版"
+  archive="${URL##*/}"
+  curl -q -fsSL --proto '=https' --proto-redir '=https' --retry 3 \
+    "https://github.com/caddyserver/caddy/releases/download/$tag/caddy_${tag#v}_checksums.txt" \
+    -o "$TMP/caddy-checksums.txt" || die "下载 Caddy 校验和失败"
+  expected="$(awk -v name="$archive" '$2 == name {print $1}' "$TMP/caddy-checksums.txt")"
+  [[ "$expected" =~ ^[0-9a-fA-F]{128}$ ]] || die "Caddy 校验和格式错误"
+  actual="$(sha512sum "$TMP/caddy.tar.gz" | awk '{print $1}')"
+  [ "${expected,,}" = "$actual" ] || die "Caddy 校验和不匹配"
+  tar -xOzf "$TMP/caddy.tar.gz" caddy > "$TMP/caddy"
   install -m 0755 "$TMP/caddy" "$CADDY_BIN"
   info "Caddy 安装完成：$("$CADDY_BIN" version | head -1)"
 fi
@@ -120,10 +144,30 @@ fi
 
 # 先试 Release 里的预编译版本，省掉在小机器上编译的痛苦。
 get_release() {
+  # A local checkout or explicit ref must use its matching source.
+  [ -z "$SRC" ] && [ "$REF" = main ] || return 1
   info "尝试下载预编译的 caddyui……"
+  curl -q -fsSL --proto '=https' --proto-redir '=https' --max-time 60 \
+    "https://github.com/${REPO}/releases/latest/download/SHA256SUMS" -o "$TMP/SHA256SUMS" || return 1
   for name in "caddyui-linux-${ARCH}" "relay-linux-${ARCH}"; do
     local url="https://github.com/${REPO}/releases/latest/download/${name}"
     if curl -fsSL --retry 2 --max-time 180 "$url" -o "$TMP/caddyui" 2>/dev/null; then
+      local expected actual
+      expected="$(awk -v name="$name" '$2 == name {print $1}' "$TMP/SHA256SUMS")"
+      actual="$(sha256sum "$TMP/caddyui" | awk '{print $1}')"
+      [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]] && [ "${expected,,}" = "$actual" ] || return 1
+      curl -q -fsSL --proto '=https' --proto-redir '=https' --max-time 60 \
+        "https://github.com/${REPO}/releases/latest/download/caddyui-deploy.tar.gz" \
+        -o "$TMP/deploy.tar.gz" || return 1
+      expected="$(awk '$2 == "caddyui-deploy.tar.gz" {print $1}' "$TMP/SHA256SUMS")"
+      actual="$(sha256sum "$TMP/deploy.tar.gz" | awk '{print $1}')"
+      [[ "$expected" =~ ^[0-9a-fA-F]{64}$ ]] && [ "${expected,,}" = "$actual" ] || return 1
+      mkdir -p "$TMP/release-deploy"
+      tar -xzf "$TMP/deploy.tar.gz" -C "$TMP/release-deploy" || return 1
+      for file in upgrade-caddy.sh upgrade-request.sh caddyui-upgrade.socket caddyui-upgrade@.service caddy.service caddyui.service; do
+        [ -f "$TMP/release-deploy/deploy/$file" ] || return 1
+      done
+      DEPLOY_SRC="$TMP/release-deploy"
       chmod +x "$TMP/caddyui"
       if "$TMP/caddyui" -version >/dev/null 2>&1; then
         info "下载成功：$("$TMP/caddyui" -version)"
@@ -164,6 +208,7 @@ ensure_go() {
 }
 
 build_from_source() {
+  DEPLOY_SRC=""
   warn "没有可用的预编译版本，改为在本机编译。"
 
   local mem
@@ -176,11 +221,14 @@ build_from_source() {
     cp -r "$SRC" "$TMP/src"
   else
     info "下载源码……"
-    curl -fsSL --retry 3 "https://codeload.github.com/${REPO}/tar.gz/refs/heads/${REF}" -o "$TMP/src.tar.gz" \
+    curl -fsSL --retry 3 "https://codeload.github.com/${REPO}/tar.gz/${REF}" -o "$TMP/src.tar.gz" \
       || die "下载源码失败"
     mkdir -p "$TMP/src"
     tar -xzf "$TMP/src.tar.gz" -C "$TMP/src" --strip-components=1
   fi
+
+  # Install service files from the same source tree that produced the binary.
+  DEPLOY_SRC="$TMP/src"
 
   ensure_go
 
@@ -292,7 +340,7 @@ fetch deploy/caddyui.service "$TMP/caddyui.service"
 install -m 0644 "$TMP/caddy.service" "$SYSTEMD_DIR/caddy.service"
 
 # 面板端口允许通过环境变量 PANEL_PORT 覆盖
-sed "s|-listen 0.0.0.0:81|-listen 0.0.0.0:${PANEL_PORT}|" \
+sed "s|-listen 127.0.0.1:81|-listen ${PANEL_BIND}:${PANEL_PORT}|" \
     "$TMP/caddyui.service" > "$SYSTEMD_DIR/caddyui.service"
 chmod 0644 "$SYSTEMD_DIR/caddyui.service"
 
@@ -309,18 +357,19 @@ sleep 2
 
 echo
 if systemctl is-active --quiet caddy && systemctl is-active --quiet caddyui; then
-  IP="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || hostname -I 2>/dev/null | awk '{print $1}')"
   info "安装完成！"
   echo
-  echo "    面板地址:  http://${IP:-<服务器IP>}:${PANEL_PORT}"
+  echo "    监听地址:  http://${PANEL_BIND}:${PANEL_PORT}"
+  echo "    SSH 隧道: ssh -N -L 8081:127.0.0.1:${PANEL_PORT} <SSH用户>@<服务器IP>"
+  echo "    隧道连接后打开: http://127.0.0.1:8081"
+  echo "    首次注册口令: 在服务器执行 sudo cat /var/lib/caddyui/setup-token"
   if [ "$MIGRATED" = "1" ]; then
     echo "    已从 Relay 升级，站点和账号都在。会话被清空了，需要重新登录一次。"
   else
     echo "    第一次打开会让你用邮箱创建管理员账号，这个邮箱同时会作为证书联系邮箱。"
   fi
   echo
-  echo "  提示：云服务器记得在安全组里放行 ${PANEL_PORT}、80、443 端口。"
-echo "    ${PANEL_PORT} 是配置改崩时的救援通道，建议用防火墙只放给自己的 IP。"
+  echo "  公网站点按需放行 80、443；面板端口无需开放公网。日常管理请使用 HTTPS 或 SSH 隧道。"
 else
   warn "有服务没能启动，看一下日志："
   echo "    journalctl -u caddy -n 50 --no-pager"

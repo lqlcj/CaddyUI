@@ -27,6 +27,7 @@ else
   echo "    /var/lib/caddyui    面板数据库"
   echo "    /var/lib/relay      老版本 Relay 的数据库（如果还在）"
   echo "    /var/lib/caddy      Caddy 的证书和 ACME 账户密钥"
+  echo "    /var/lib/caddyui-upgrade  最近一次升级的配置备份"
   echo "    /etc/caddy          引导配置"
   echo "    caddy 系统用户"
   echo
@@ -74,17 +75,17 @@ if [ -e /usr/bin/caddy ]; then
     warn "/usr/bin/caddy 是包管理器装的，没有删。要删请用 apt remove caddy / yum remove caddy"
   else
     info "删除 caddy 二进制"
-    rm -f /usr/bin/caddy
+    rm -f /usr/bin/caddy /usr/bin/caddy.bak
   fi
 fi
 
 # ---------- 数据 ----------
 
 if [ "$KEEP_DATA" = "1" ]; then
-  info "保留 /var/lib/caddyui、/var/lib/relay、/var/lib/caddy、/etc/caddy 和 caddy 用户"
+  info "保留 /var/lib/caddyui、/var/lib/relay、/var/lib/caddy、/var/lib/caddyui-upgrade、/etc/caddy 和 caddy 用户"
 else
   info "删除配置与数据"
-  rm -rf /etc/caddy /var/lib/caddyui /var/lib/relay /var/lib/caddy /run/caddy
+  rm -rf /etc/caddy /var/lib/caddyui /var/lib/caddyui-upgrade /var/lib/relay /var/lib/caddy /run/caddy
   if id caddy >/dev/null 2>&1; then
     info "删除 caddy 用户"
     userdel caddy >/dev/null 2>&1 || warn "caddy 用户没删掉，可能还有进程在用，可稍后手动 userdel caddy"

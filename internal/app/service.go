@@ -4,6 +4,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"sync"
 
 	"caddyui/internal/caddy"
 	"caddyui/internal/caddybin"
@@ -24,10 +25,12 @@ var ErrSyncSkippedEmptyDB = errors.New("数据库里没有站点，但 Caddy 正
 
 // Service 是面板的业务门面。
 type Service struct {
-	Store  *store.Store
-	Caddy  *caddy.Client
-	Certs  *certs.Locator
-	Binary *caddybin.Manager
+	Store         *store.Store
+	Caddy         *caddy.Client
+	Certs         *certs.Locator
+	Binary        *caddybin.Manager
+	SetupToken    string
+	publicationMu sync.Mutex
 }
 
 // Render 生成当前应该生效的 Caddyfile，但不下发。
@@ -50,6 +53,8 @@ func (s *Service) Render() ([]byte, error) {
 // 面板里的编辑不会丢（还在库里），线上也没受影响（Caddy 保持旧配置），用户
 // 改完重试即可。这比"下发失败就回滚数据库"对用户友好得多。
 func (s *Service) Apply(reason string) error {
+	s.publicationMu.Lock()
+	defer s.publicationMu.Unlock()
 	caddyfile, err := s.Render()
 	if err != nil {
 		return err
@@ -72,6 +77,8 @@ func (s *Service) Apply(reason string) error {
 
 // ApplyVersion 回滚到某个历史版本。
 func (s *Service) ApplyVersion(id int64) error {
+	s.publicationMu.Lock()
+	defer s.publicationMu.Unlock()
 	v, err := s.Store.ConfigVersionByID(id)
 	if err != nil {
 		return err
@@ -87,6 +94,8 @@ func (s *Service) ApplyVersion(id int64) error {
 // Sync 在面板启动时把库里的站点推给 Caddy，不记录版本历史（避免每次重启都
 // 塞一条一模一样的记录）。
 func (s *Service) Sync() error {
+	s.publicationMu.Lock()
+	defer s.publicationMu.Unlock()
 	sites, err := s.Store.Sites()
 	if err != nil {
 		return err

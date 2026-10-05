@@ -33,7 +33,7 @@ func (s *Server) handleConfig(w http.ResponseWriter, r *http.Request) {
 // 之后，点这个按钮。
 func (s *Server) handleConfigApply(w http.ResponseWriter, r *http.Request) {
 	if err := s.svc.Apply("手动重新下发"); err != nil {
-		flashErr(w, "下发失败：%v ｜ 线上仍在运行上一份配置。", err)
+		flashErr(w, "下发失败：%v ｜ 请核对 Caddy 状态；被拒绝的配置不会替换原配置。", err)
 	} else {
 		flashOK(w, "配置已重新下发并生效。")
 	}
@@ -182,7 +182,7 @@ func (s *Server) handleSettingsACME(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.svc.Apply("修改证书设置"); err != nil {
-		flashWarn(w, "设置已保存，但下发失败：%v ｜ 线上不受影响。", err)
+		flashWarn(w, "设置已保存，但下发未完整成功：%v ｜ 请核对 Caddy 状态和实际配置。", err)
 	} else {
 		flashOK(w, "证书设置已保存并生效。")
 	}
@@ -190,6 +190,8 @@ func (s *Server) handleSettingsACME(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSettingsPassword(w http.ResponseWriter, r *http.Request) {
+	s.accountMu.Lock()
+	defer s.accountMu.Unlock()
 	user := userFrom(r.Context())
 	if user == nil {
 		redirect(w, r, "/login")
@@ -212,7 +214,6 @@ func (s *Server) handleSettingsPassword(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// 改完密码把所有会话踢掉，包括当前这个，逼一次重新登录。
-	_ = s.svc.Store.DeleteUserSessions(user.ID)
 	clearSessionCookie(w)
 	flashOK(w, "密码已修改，请用新密码重新登录。")
 	redirect(w, r, "/login")

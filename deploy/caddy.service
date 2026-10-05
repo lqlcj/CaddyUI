@@ -42,6 +42,7 @@ RuntimeDirectoryMode=0750
 # 证书和 ACME 账户密钥存这里 —— 备份时千万别漏了它
 StateDirectory=caddy
 StateDirectoryMode=0700
+UMask=0077
 
 LimitNOFILE=1048576
 PrivateTmp=true

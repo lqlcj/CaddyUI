@@ -2,6 +2,7 @@ package web
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"errors"
 	"log"
@@ -67,7 +68,7 @@ func (s *Server) auth(next http.HandlerFunc) http.HandlerFunc {
 				http.Error(w, "表单太大或格式不正确", http.StatusBadRequest)
 				return
 			}
-			if !checkOrigin(r) || r.PostFormValue("csrf") != sess.CSRF {
+			if !checkOrigin(r) || subtle.ConstantTimeCompare([]byte(r.PostFormValue("csrf")), []byte(sess.CSRF)) != 1 {
 				http.Error(w, "请求校验失败，请返回上一页刷新后重试", http.StatusForbidden)
 				return
 			}
@@ -91,6 +92,9 @@ func (s *Server) redirectToLogin(w http.ResponseWriter, r *http.Request) {
 // checkOrigin 做同源检查，作为 CSRF 的第二道防线，也覆盖登录/初始化这两个
 // 还没有会话 token 的表单。
 func checkOrigin(r *http.Request) bool {
+	if r.Header.Get("Sec-Fetch-Site") == "cross-site" {
+		return false
+	}
 	origin := r.Header.Get("Origin")
 	if origin == "" {
 		// 有些环境不发 Origin，退而求其次看 Referer；两个都没有就放行，
@@ -103,13 +107,30 @@ func checkOrigin(r *http.Request) bool {
 		if err != nil {
 			return false
 		}
-		return u.Host == r.Host
+		return sameOrigin(r, u)
 	}
 	u, err := url.Parse(origin)
 	if err != nil {
 		return false
 	}
-	return u.Host == r.Host
+	return sameOrigin(r, u)
+}
+
+func sameOrigin(r *http.Request, u *url.URL) bool {
+	scheme := "http"
+	if secureRequest(r) {
+		scheme = "https"
+	}
+	return u.User == nil && u.Scheme == scheme && strings.EqualFold(u.Host, r.Host)
+}
+
+func loopbackPeer(r *http.Request) bool {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	return err == nil && net.ParseIP(host).IsLoopback()
+}
+
+func secureRequest(r *http.Request) bool {
+	return r.TLS != nil || (loopbackPeer(r) && strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"))
 }
 
 func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expires time.Time) {
@@ -119,9 +140,8 @@ func setSessionCookie(w http.ResponseWriter, r *http.Request, token string, expi
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		// 面板初次访问多半是 http://ip:81，这时候不能加 Secure，否则
-		// cookie 根本存不下来。等用户把面板挂到域名上走 https 就自动加上。
-		Secure:  r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https"),
+		// 保留 SSH 隧道中的本机 HTTP 登录；HTTPS 或可信本机反代使用 Secure。
+		Secure:  secureRequest(r),
 		Expires: expires,
 	})
 }
@@ -136,7 +156,7 @@ func clearSessionCookie(w http.ResponseWriter) {
 // ---------- 初始化 ----------
 
 func (s *Server) handleSetupForm(w http.ResponseWriter, r *http.Request) {
-	if s.svc.Store.UserCount() > 0 {
+	if s.svc.Store.UserCount() != 0 {
 		redirect(w, r, "/login")
 		return
 	}
@@ -144,7 +164,7 @@ func (s *Server) handleSetupForm(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetupSubmit(w http.ResponseWriter, r *http.Request) {
-	if s.svc.Store.UserCount() > 0 {
+	if s.svc.Store.UserCount() != 0 {
 		redirect(w, r, "/login")
 		return
 	}
@@ -152,6 +172,16 @@ func (s *Server) handleSetupSubmit(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "请求校验失败", http.StatusBadRequest)
 		return
 	}
+	if s.svc.SetupToken == "" || subtle.ConstantTimeCompare([]byte(r.PostFormValue("setup_token")), []byte(s.svc.SetupToken)) != 1 {
+		http.Error(w, "初始化口令不正确，请从服务器数据目录的 setup-token 文件读取", http.StatusForbidden)
+		return
+	}
+	if !s.logins.allow("setup:"+clientIP(r), 10, 5*time.Minute) {
+		http.Error(w, "尝试次数过多，请稍后重试", http.StatusTooManyRequests)
+		return
+	}
+	s.accountMu.Lock()
+	defer s.accountMu.Unlock()
 
 	email := store.NormalizeEmail(r.PostFormValue("username"))
 	password := r.PostFormValue("password")
@@ -172,8 +202,7 @@ func (s *Server) handleSetupSubmit(w http.ResponseWriter, r *http.Request) {
 
 	// 注册邮箱直接当证书联系邮箱用，省掉「设置里还有一格要填」这一步。
 	//
-	// Let's Encrypt 会往这个地址发证书续期失败的告警，这是唯一能提前知道
-	// 证书要出问题的渠道，不该指望用户自己想起来去填。设置页只读展示该值。
+	// 联系邮箱不等于到期监控；CA 不一定发送续期或到期通知。
 	if err := s.svc.Store.SetSetting(app.SettingACMEEmail, email); err != nil {
 		log.Printf("写入 ACME 联系邮箱失败（管理员账号已创建）: %v", err)
 	}
@@ -223,6 +252,13 @@ func (s *Server) handleLoginSubmit(w http.ResponseWriter, r *http.Request) {
 		fail("尝试次数过多，请 5 分钟后再试")
 		return
 	}
+	// Bound bcrypt work even when requests come from many different IPs.
+	if !s.logins.allow("global-login", 100, 5*time.Minute) {
+		fail("尝试次数过多，请 5 分钟后再试")
+		return
+	}
+	s.accountMu.Lock()
+	defer s.accountMu.Unlock()
 
 	user, err := s.svc.Store.Authenticate(username, password)
 	if err != nil {
@@ -289,6 +325,9 @@ func (l *limiter) allow(key string, max int, window time.Duration) bool {
 			}
 		}
 	}
+	if len(l.hits) >= 4096 && len(l.hits[key]) == 0 {
+		return false
+	}
 	if len(kept) >= max {
 		l.hits[key] = kept
 		return false
@@ -316,7 +355,9 @@ func clientIP(r *http.Request) string {
 			// 离面板最近的那一跳看到的真实来源。取第一项的话，攻击者自己
 			// 带头里的假 XFF 就能逐个换"IP"绕过登录限速。
 			parts := strings.Split(xff, ",")
-			return strings.TrimSpace(parts[len(parts)-1])
+			if forwarded := net.ParseIP(strings.TrimSpace(parts[len(parts)-1])); forwarded != nil {
+				return forwarded.String()
+			}
 		}
 	}
 	return host

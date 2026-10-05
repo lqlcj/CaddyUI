@@ -223,7 +223,7 @@ func (s *Server) handleSiteDelete(w http.ResponseWriter, r *http.Request) {
 // 否则小白看到红字会以为网站已经炸了。
 func (s *Server) applyAndFlash(w http.ResponseWriter, reason string, site *store.Site) {
 	if err := s.svc.Apply(reason); err != nil {
-		flashWarn(w, "改动已保存，但下发到 Caddy 失败：%v ｜ 线上仍在运行上一份配置，网站不受影响。修正后可在「配置」页点「重新下发」。", err)
+		flashWarn(w, "改动已保存，但下发未完整成功：%v ｜ 请核对 Caddy 状态和实际配置。修正后可在「配置」页点「重新下发」。", err)
 		return
 	}
 	if site != nil && site.HTTPS && site.Enabled {

@@ -3,7 +3,8 @@
 set -euo pipefail
 [ "$(id -u)" -eq 0 ] || { echo 'Run this test as root'; exit 1; }
 source_dir="$(cd "$(dirname "$0")" && pwd)"
-temporary="$(mktemp -d /var/tmp/caddyui-upgrade-test.XXXXXX)"
+# PrivateTmp hides /var/tmp from the unit; fixtures must live outside it.
+temporary="$(mktemp -d /run/caddyui-upgrade-test.XXXXXX)"
 name="caddyui-upgrade-test-$$"
 cleanup() {
   systemctl stop "$name.socket" "$name@*.service" >/dev/null 2>&1 || true

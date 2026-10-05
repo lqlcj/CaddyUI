@@ -10,7 +10,7 @@ import (
 // RenderOptions 是生成 Caddyfile 需要的全部输入。
 type RenderOptions struct {
 	AdminAddr string // 必须和面板连接的 admin 地址一致，否则下发后面板会失联
-	ACMEEmail string // 证书快过期时 Let's Encrypt 会往这里发提醒，可以留空
+	ACMEEmail string // ACME 联系邮箱，不替代证书到期监控，可以留空
 	ACMECA    string // 自定义 ACME 目录，留空用默认（Let's Encrypt，失败自动切 ZeroSSL）
 	Sites     []*store.Site
 }

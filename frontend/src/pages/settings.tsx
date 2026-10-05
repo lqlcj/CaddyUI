@@ -94,7 +94,7 @@ export function SettingsPage({ data }: { data: PageData }) {
                 {data.ACMEEmail || '未设置'}
               </p>
               <p className="text-xs text-muted-foreground">
-                使用管理员首次注册的邮箱，接收证书续期通知。
+                使用管理员首次注册的邮箱作为 ACME 联系方式。到期提醒取决于 CA，请另设证书到期监控。
               </p>
             </div>
             <Field
@@ -260,7 +260,7 @@ export function SettingsPage({ data }: { data: PageData }) {
         open={upgrade}
         onOpenChange={setUpgrade}
         title={`升级 Caddy 到 ${data.CaddyLatest?.Version || ''}`}
-        description="升级会重启 Caddy，所有网站会短暂中断。升级失败时由升级助手自动回滚。"
+        description="升级到执行时的官方最新稳定版，仅支持标准安装且不带额外插件的 Caddy 2。升级前检查配置，重启会短暂中断网站；启动检查失败时尝试恢复旧内核和配置。"
         onConfirm={() => submit('/settings/caddy/upgrade')}
       />
     </>

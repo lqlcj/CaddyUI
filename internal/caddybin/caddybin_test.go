@@ -1,6 +1,49 @@
 package caddybin
 
-import "testing"
+import (
+	"io"
+	"net/http"
+	"strings"
+	"testing"
+)
+
+type releaseTransport func(*http.Request) (*http.Response, error)
+
+func (f releaseTransport) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
+
+func TestReleaseMetadataIsStrict(t *testing.T) {
+	for _, tc := range []struct {
+		tag   string
+		flags string
+		valid bool
+	}{
+		{"v2.11.7", "", true},
+		{"v2.11.7<script>", "", false},
+		{"v2.12.0-beta.1", "", false},
+		{"v2.11.7", `,"prerelease":true`, false},
+		{"v2.11.7", `,"draft":true`, false},
+	} {
+		t.Run(tc.tag+tc.flags, func(t *testing.T) {
+			m := New("")
+			m.httpOnce.Do(func() {
+				m.hc = &http.Client{Transport: releaseTransport(func(r *http.Request) (*http.Response, error) {
+					if r.URL.String() != releaseAPI {
+						t.Fatalf("unexpected release endpoint: %s", r.URL)
+					}
+					body := `{"tag_name":"` + tc.tag + `","html_url":"https://untrusted.example/"` + tc.flags + "}"
+					return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body))}, nil
+				})}
+			})
+			release, err := m.Latest(true)
+			if (err == nil) != tc.valid {
+				t.Fatalf("valid=%v error=%v", tc.valid, err)
+			}
+			if tc.valid && release.URL != releaseURL+"/tag/"+tc.tag {
+				t.Fatalf("untrusted release URL: %s", release.URL)
+			}
+		})
+	}
+}
 
 func TestNewer(t *testing.T) {
 	cases := []struct {

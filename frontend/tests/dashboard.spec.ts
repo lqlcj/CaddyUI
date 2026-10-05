@@ -16,6 +16,8 @@ test('React dashboard preserves account, site and configuration workflows', asyn
   const password = 'TestPassword123!'
   await page.goto('/')
   await expect(page.getByText('创建管理员账户')).toBeVisible()
+  await page.getByLabel('初始化口令', { exact: true }).fill(await (await request.get('http://127.0.0.1:12029/test/setup-token')).text())
+  await page.screenshot({ path: testInfo.outputPath('setup-security.png'), animations: 'disabled' })
   await page.getByLabel('邮箱', { exact: true }).fill('admin@example.com')
   await page.getByLabel('密码', { exact: true }).fill(password)
   await page.getByLabel('确认密码', { exact: true }).fill(password)

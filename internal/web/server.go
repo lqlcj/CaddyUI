@@ -12,17 +12,19 @@ import (
 	"sync"
 
 	"caddyui/internal/app"
+	"caddyui/internal/caddybin"
 	"caddyui/internal/store"
 )
 
 // Server 持有渲染面板所需的一切。
 type Server struct {
-	svc      *app.Service
-	assets   fs.FS
-	index    *template.Template
-	version  string
-	logins   *limiter
-	configMu sync.Mutex
+	svc       *app.Service
+	assets    fs.FS
+	index     *template.Template
+	version   string
+	logins    *limiter
+	configMu  sync.Mutex
+	accountMu sync.Mutex
 }
 
 // New 构造面板的 http.Handler。
@@ -87,7 +89,7 @@ func (s *Server) routes() http.Handler {
 	mux.HandleFunc("POST /settings/acme", s.auth(s.configChange(s.handleSettingsACME)))
 	mux.HandleFunc("POST /settings/password", s.auth(s.handleSettingsPassword))
 	mux.HandleFunc("POST /settings/caddy/check", s.auth(s.handleCaddyCheck))
-	mux.HandleFunc("POST /settings/caddy/upgrade", s.auth(s.handleCaddyUpgrade))
+	mux.HandleFunc("POST /settings/caddy/upgrade", s.auth(s.configChange(s.handleCaddyUpgrade)))
 
 	// 主题切换不需要登录：登录页和初始化页上也有这个按钮。
 	mux.HandleFunc("POST /theme", s.handleThemePublic)
@@ -100,6 +102,10 @@ func (s *Server) configChange(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		s.configMu.Lock()
 		defer s.configMu.Unlock()
+		if s.svc.Binary != nil && s.svc.Binary.Job().State == caddybin.StateRunning {
+			http.Error(w, "Caddy 正在升级，请完成后再修改配置", http.StatusConflict)
+			return
+		}
 		next(w, r)
 	}
 }

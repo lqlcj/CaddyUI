@@ -23,11 +23,14 @@ type User struct {
 // 和密码错误返回的是同一个错误。
 var ErrBadCredentials = errors.New("邮箱或密码错误")
 
+var ErrAlreadyInitialized = errors.New("管理员已经创建，请登录")
+
 // UserCount 返回管理员数量，0 表示还没初始化过。
 func (s *Store) UserCount() int {
 	var n int
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n); err != nil {
-		return 0
+		// Fail closed: a database error must never reopen registration.
+		return -1
 	}
 	return n
 }
@@ -85,7 +88,7 @@ func HashPassword(pw string) (string, error) {
 	return string(h), nil
 }
 
-// CreateUser 新建管理员。username 传邮箱。
+// CreateUser 原子地创建唯一的初始管理员。username 传邮箱。
 func (s *Store) CreateUser(username, password string) (*User, error) {
 	username = NormalizeEmail(username)
 	if err := ValidateEmail(username); err != nil {
@@ -100,13 +103,19 @@ func (s *Store) CreateUser(username, password string) (*User, error) {
 	}
 	now := time.Now().Unix()
 	res, err := s.db.Exec(
-		`INSERT INTO users(username, password_hash, created_at, updated_at) VALUES(?,?,?,?)`,
+		`INSERT INTO users(username, password_hash, created_at, updated_at)
+		 SELECT ?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM users)`,
 		username, hash, now, now)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return nil, fmt.Errorf("邮箱 %q 已经注册过了", username)
 		}
 		return nil, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return nil, err
+	} else if n != 1 {
+		return nil, ErrAlreadyInitialized
 	}
 	id, _ := res.LastInsertId()
 	return &User{ID: id, Username: username, CreatedAt: now}, nil
@@ -176,7 +185,18 @@ func (s *Store) ChangePassword(id int64, oldPw, newPw string) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`,
+	tx, err := s.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?`,
 		newHash, time.Now().Unix(), id)
-	return err
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM sessions WHERE user_id = ?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }

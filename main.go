@@ -7,6 +7,7 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
 	"embed"
 	"errors"
 	"flag"
@@ -50,7 +51,7 @@ func main() {
 	log.SetFlags(log.Ldate | log.Ltime)
 
 	var (
-		listen    = flag.String("listen", envOr(":81", "CADDYUI_LISTEN", "RELAY_LISTEN"), "面板监听地址")
+		listen    = flag.String("listen", envOr("127.0.0.1:81", "CADDYUI_LISTEN", "RELAY_LISTEN"), "面板监听地址")
 		dataDir   = flag.String("data", envOr("./data", "CADDYUI_DATA_DIR", "RELAY_DATA_DIR"), "数据目录（数据库存放位置）")
 		caddyAddr = flag.String("caddy", envOr("127.0.0.1:2019", "CADDYUI_CADDY_ADMIN", "RELAY_CADDY_ADMIN"), "Caddy Admin API 地址，支持 127.0.0.1:2019 或 unix//run/caddy/admin.sock")
 		caddyData = flag.String("caddy-data", envOr("", "CADDYUI_CADDY_DATA"), "Caddy 数据目录（证书放在这里），留空自动探测")
@@ -77,6 +78,18 @@ func main() {
 		log.Fatalf("打开数据库失败: %v", err)
 	}
 	defer st.Close()
+	setupToken := ""
+	if st.UserCount() == 0 {
+		setupToken = rand.Text()
+		tokenPath := filepath.Join(absData, "setup-token")
+		if err := os.WriteFile(tokenPath, []byte(setupToken+"\n"), 0o600); err != nil {
+			log.Fatalf("写入初始化口令失败: %v", err)
+		}
+		if err := os.Chmod(tokenPath, 0o600); err != nil {
+			log.Fatalf("设置初始化口令权限失败: %v", err)
+		}
+		log.Printf("首次注册需要初始化口令，请在服务器读取 %s（重启后会重新生成）", tokenPath)
+	}
 
 	certLoc := certs.New(*caddyData)
 	log.Printf("Caddy 证书目录：%s", certLoc.CertRoot())
@@ -87,10 +100,11 @@ func main() {
 	}
 
 	svc := &app.Service{
-		Store:  st,
-		Caddy:  caddy.New(*caddyAddr),
-		Certs:  certLoc,
-		Binary: binMgr,
+		Store:      st,
+		Caddy:      caddy.New(*caddyAddr),
+		Certs:      certLoc,
+		Binary:     binMgr,
+		SetupToken: setupToken,
 	}
 
 	// 启动时把数据库里的站点同步给 Caddy。这样即使 Caddy 单独重启过、
@@ -120,9 +134,8 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
-		// GitHub 项目导入要下载并解压仓库，慢网络上可能超过一分钟。
-		WriteTimeout: 4 * time.Minute,
-		IdleTimeout:  90 * time.Second,
+		WriteTimeout:      90 * time.Second,
+		IdleTimeout:       90 * time.Second,
 	}
 
 	go func() {

@@ -1,6 +1,6 @@
 import { createServer } from 'node:http'
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -20,6 +20,10 @@ let reject = false
 let stopServer = () => {}
 const mock = createServer((request, response) => {
   request.resume()
+  if (request.url === '/test/setup-token') {
+    response.end(readFileSync(path.join(temporary, 'data', 'setup-token'), 'utf8').trim())
+    return
+  }
   if (request.url === '/test/shutdown') {
     response.end('ok')
     stopServer()

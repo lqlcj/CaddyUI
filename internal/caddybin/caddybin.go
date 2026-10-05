@@ -118,7 +118,7 @@ func (m *Manager) client() *http.Client {
 }
 
 // verRe 匹配 `v2.11.4`，Caddy 的 version 输出第一段就是它。
-var verRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+`)
+var verRe = regexp.MustCompile(`^v?\d+\.\d+\.\d+$`)
 
 // CurrentVersion 跑一次 `caddy version` 读出当前版本。
 //
@@ -182,24 +182,22 @@ func (m *Manager) Latest(force bool) (*Release, error) {
 
 	var payload struct {
 		TagName     string    `json:"tag_name"`
-		HTMLURL     string    `json:"html_url"`
+		Prerelease  bool      `json:"prerelease"`
+		Draft       bool      `json:"draft"`
 		PublishedAt time.Time `json:"published_at"`
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&payload); err != nil {
 		return nil, fmt.Errorf("解析 GitHub 返回失败：%w", err)
 	}
-	if verRe.FindString(payload.TagName) == "" {
+	if !verRe.MatchString(payload.TagName) || payload.Prerelease || payload.Draft {
 		return nil, fmt.Errorf("拿到的版本号不像版本号: %q", payload.TagName)
 	}
 
 	rel := &Release{
 		Version:   normalize(payload.TagName),
 		Published: payload.PublishedAt,
-		URL:       payload.HTMLURL,
+		URL:       releaseURL + "/tag/" + normalize(payload.TagName),
 		CheckedAt: time.Now(),
-	}
-	if rel.URL == "" {
-		rel.URL = releaseURL
 	}
 
 	m.mu.Lock()
@@ -221,6 +219,9 @@ func (m *Manager) CachedLatest() *Release {
 func (m *Manager) HelperAvailable() (bool, string) {
 	if runtime.GOOS != "linux" {
 		return false, "一键升级只支持 Linux（当前系统：" + runtime.GOOS + "）"
+	}
+	if m.BinPath != "/usr/bin/caddy" {
+		return false, "一键升级仅支持标准安装路径 /usr/bin/caddy，请手动升级自定义安装"
 	}
 	if _, err := helperRequest(UpgradeSocket, "CHECK", 5*time.Second); err != nil {
 		return false, "升级服务不可用，请检查 caddyui-upgrade.socket 或重新运行安装脚本：" + err.Error()

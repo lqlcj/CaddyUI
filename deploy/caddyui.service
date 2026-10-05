@@ -14,12 +14,9 @@ Type=simple
 User=caddy
 Group=caddy
 
-# -listen 0.0.0.0:81 是有意为之：这是「救援通道」。
-# 万一你把配置改错、导致通过域名访问不到面板了，还能用 http://IP:81 进来回滚。
-# 日常使用建议在面板里加一条站点把自己反代出去走 HTTPS，
-# 然后用防火墙把 81 限制到你自己的 IP。
+# 默认只监听本机。首次初始化和救援通过 SSH 隧道，日常使用 HTTPS 反代。
 ExecStart=/usr/local/bin/caddyui \
-    -listen 0.0.0.0:81 \
+    -listen 127.0.0.1:81 \
     -data /var/lib/caddyui \
     -caddy unix//run/caddy/admin.sock
 
@@ -33,6 +30,7 @@ Environment=GOGC=50
 # /var/lib/caddyui，放 caddyui.db
 StateDirectory=caddyui
 StateDirectoryMode=0750
+UMask=0077
 
 # 81 是 1024 以下的特权端口，非 root 用户要靠这个能力才绑得上。
 AmbientCapabilities=CAP_NET_BIND_SERVICE
@@ -42,9 +40,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 
-# 不能用 ProtectHome=true：Caddy 的证书就放在 caddy 用户的家目录
-# （/var/lib/caddy/.local/share/caddy）下面，开了就读不到证书路径了。
-ProtectHome=false
+# ProtectHome 保护 /home、/root、/run/user，不影响 /var/lib/caddy。
+ProtectHome=true
 
 [Install]
 WantedBy=multi-user.target

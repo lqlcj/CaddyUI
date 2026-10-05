@@ -17,6 +17,8 @@ case "$request" in
     trap 'rm -f "$output"' EXIT
     status=0
     /usr/local/lib/caddyui/upgrade-caddy.sh </dev/null >"$output" 2>&1 || status=$?
+    # Persist the result in the journal even if the browser/panel disconnected.
+    cat "$output" >&2
     tail -c 65536 "$output"
     printf '\nCADDYUI-UPGRADE-EXIT %d\n' "$status"
     ;;

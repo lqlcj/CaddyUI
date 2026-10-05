@@ -1,0 +1,33 @@
+name: security
+
+on:
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '23 3 * * 1'
+
+permissions:
+  contents: read
+
+jobs:
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - run: npm --prefix frontend ci
+      - run: npm --prefix frontend audit --audit-level=moderate
+      - run: npm --prefix frontend run build
+      - run: go test ./...
+      - run: go vet ./...
+      - run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+      - name: Upgrade failure and recovery regression
+        run: sudo python3 deploy/test-upgrade-helper.py
